@@ -252,9 +252,7 @@ doc_events = {
 	},
 	"Purchase Invoice": {
 		"validate": [
-			"erpnext.regional.india.utils.update_grand_total_for_rcm",
-			"erpnext.regional.united_arab_emirates.utils.update_grand_total_for_rcm",
-			"erpnext.regional.united_arab_emirates.utils.validate_returns"
+			"erpnext.regional.india.utils.update_grand_total_for_rcm"
 			]
 	},
 	"Payment Entry": {
@@ -390,14 +388,7 @@ regional_overrides = {
 		'erpnext.hr.utils.calculate_hra_exemption_for_period': 'erpnext.regional.india.utils.calculate_hra_exemption_for_period',
 		'erpnext.accounts.doctype.purchase_invoice.purchase_invoice.make_regional_gl_entries': 'erpnext.regional.india.utils.make_regional_gl_entries',
 		'erpnext.controllers.accounts_controller.validate_einvoice_fields': 'erpnext.regional.india.e_invoice.utils.validate_einvoice_fields'
-	},
-	'United Arab Emirates': {
-		'erpnext.controllers.taxes_and_totals.update_itemised_tax_data': 'erpnext.regional.united_arab_emirates.utils.update_itemised_tax_data',
-		'erpnext.accounts.doctype.purchase_invoice.purchase_invoice.make_regional_gl_entries': 'erpnext.regional.united_arab_emirates.utils.make_regional_gl_entries',
-	},
-	'Saudi Arabia': {
-		'erpnext.controllers.taxes_and_totals.update_itemised_tax_data': 'erpnext.regional.united_arab_emirates.utils.update_itemised_tax_data'
-	},
+	}
 	'Italy': {
 		'erpnext.controllers.taxes_and_totals.update_itemised_tax_data': 'erpnext.regional.italy.utils.update_itemised_tax_data',
 		'erpnext.controllers.accounts_controller.validate_regional': 'erpnext.regional.italy.utils.sales_invoice_validate',
