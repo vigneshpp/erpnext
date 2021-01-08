@@ -243,12 +243,10 @@ doc_events = {
 	"Sales Invoice": {
 		"on_submit": [
 			"erpnext.regional.create_transaction_log",
-			"erpnext.regional.italy.utils.sales_invoice_on_submit",
-			"erpnext.erpnext_integrations.taxjar_integration.create_transaction"
+			"erpnext.regional.italy.utils.sales_invoice_on_submit"
 		],
 		"on_cancel": [
-			"erpnext.regional.italy.utils.sales_invoice_on_cancel",
-			"erpnext.erpnext_integrations.taxjar_integration.delete_transaction"
+			"erpnext.regional.italy.utils.sales_invoice_on_cancel"
 		],
 		"on_trash": "erpnext.regional.check_deletion_permission"
 	},
@@ -275,9 +273,6 @@ doc_events = {
 	},
 	"Email Unsubscribe": {
 		"after_insert": "erpnext.crm.doctype.email_campaign.email_campaign.unsubscribe_recipient"
-	},
-	('Quotation', 'Sales Order', 'Sales Invoice'): {
-		'validate': ["erpnext.erpnext_integrations.taxjar_integration.set_sales_tax"]
 	}
 }
 
