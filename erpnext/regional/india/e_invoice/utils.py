@@ -23,7 +23,7 @@ def validate_einvoice_fields(doc):
 	invalid_doctype = doc.doctype != 'Sales Invoice'
 	invalid_supply_type = doc.get('gst_category') not in ['Registered Regular', 'SEZ', 'Overseas', 'Deemed Export']
 	company_transaction = doc.get('billing_address_gstin') == doc.get('company_gstin')
-	no_taxes_applied = len(doc.get('taxes', [])) == 0
+	no_taxes_applied = not doc.get('taxes')
 
 	if not einvoicing_enabled or invalid_doctype or invalid_supply_type or company_transaction or no_taxes_applied:
 		return
@@ -86,10 +86,10 @@ def get_doc_details(invoice):
 		invoice_date=invoice_date
 	))
 
-def get_party_details(address_name):
+def get_party_details(address_name, company_address=None, billing_address=None, shipping_address=None):
 	d = frappe.get_all('Address', filters={'name': address_name}, fields=['*'])[0]
 
-	if (not d.gstin
+	if ((not d.gstin and not shipping_address)
 		or not d.city
 		or not d.pincode
 		or not d.address_title
@@ -107,13 +107,17 @@ def get_party_details(address_name):
 		# according to einvoice standard
 		pincode = 999999
 
-	return frappe._dict(dict(
-		gstin=d.gstin, legal_name=d.address_title,
+	party_address_details = frappe._dict(dict(
+		legal_name=d.address_title,
 		location=d.city, pincode=d.pincode,
 		state_code=d.gst_state_number,
 		address_line1=d.address_line1,
 		address_line2=d.address_line2
 	))
+	if d.gstin:
+		party_address_details.gstin = d.gstin
+
+	return party_address_details
 
 def get_gstin_details(gstin):
 	if not hasattr(frappe.local, 'gstin_cache'):
@@ -160,7 +164,7 @@ def get_item_list(invoice):
 		item.update(d.as_dict())
 
 		item.sr_no = d.idx
-		item.description = d.item_name.replace('"', '\\"')
+		item.description = json.dumps(d.item_name)[1:-1]
 
 		item.qty = abs(item.qty)
 		item.discount_amount = 0
@@ -196,9 +200,11 @@ def update_item_taxes(invoice, item):
 		item[attr] = 0
 
 	for t in invoice.taxes:
-		# this contains item wise tax rate & tax amount (incl. discount)
-		item_tax_detail = json.loads(t.item_wise_tax_detail).get(item.item_code)
-		if t.account_head in gst_accounts_list:
+		is_applicable = t.tax_amount and t.account_head in gst_accounts_list
+		if is_applicable:
+			# this contains item wise tax rate & tax amount (incl. discount)
+			item_tax_detail = json.loads(t.item_wise_tax_detail).get(item.item_code)
+
 			item_tax_rate = item_tax_detail[0]
 			# item tax amount excluding discount amount
 			item_tax_amount = (item_tax_rate / 100) * item.base_net_amount
@@ -223,7 +229,7 @@ def get_invoice_value_details(invoice):
 
 	if invoice.apply_discount_on == 'Net Total' and invoice.discount_amount:
 		invoice_value_details.base_total = abs(invoice.base_total)
-		invoice_value_details.invoice_discount_amt = invoice.base_discount_amount
+		invoice_value_details.invoice_discount_amt = abs(invoice.base_discount_amount)
 	else:
 		invoice_value_details.base_total = abs(invoice.base_net_total)
 		# since tax already considers discount amount
@@ -320,14 +326,18 @@ def make_einvoice(invoice):
 	item_list = get_item_list(invoice)
 	doc_details = get_doc_details(invoice)
 	invoice_value_details = get_invoice_value_details(invoice)
-	seller_details = get_party_details(invoice.company_address)
+	seller_details = get_party_details(invoice.company_address, company_address=1)
 
 	if invoice.gst_category == 'Overseas':
 		buyer_details = get_overseas_address_details(invoice.customer_address)
 	else:
-		buyer_details = get_party_details(invoice.customer_address)
-		place_of_supply = get_place_of_supply(invoice, invoice.doctype) or invoice.billing_address_gstin
-		place_of_supply = place_of_supply[:2]
+		buyer_details = get_party_details(invoice.customer_address, billing_address=1)
+		place_of_supply = get_place_of_supply(invoice, invoice.doctype)
+		if place_of_supply:
+			place_of_supply = place_of_supply.split('-')[0]
+		else:
+			place_of_supply = invoice.billing_address_gstin[:2]
+
 		buyer_details.update(dict(place_of_supply=place_of_supply))
 	
 	shipping_details = payment_details = prev_doc_details = eway_bill_details = frappe._dict({})
@@ -335,15 +345,11 @@ def make_einvoice(invoice):
 		if invoice.gst_category == 'Overseas':
 			shipping_details = get_overseas_address_details(invoice.shipping_address_name)
 		else:
-			shipping_details = get_party_details(invoice.shipping_address_name)
-	
-	if invoice.is_pos and invoice.base_paid_amount:
-		payment_details = get_payment_details(invoice)
-	
+			shipping_details = get_party_details(invoice.shipping_address_name, shipping_address=1)
+
 	if invoice.is_return and invoice.return_against:
 		prev_doc_details = get_return_doc_reference(invoice)
-	
-	if invoice.transporter:
+	if invoice.transporter and cint(invoice.distance):
 		eway_bill_details = get_eway_bill_details(invoice)
 	
 	# not yet implemented
@@ -378,7 +384,10 @@ def throw_error_list(errors, title):
 	else:
 		frappe.throw(errors[0], title=title)
 
-def validate_einvoice(validations, einvoice, errors=[]):
+def validate_einvoice(validations, einvoice, errors=None):
+	if errors is None:
+		errors = []
+
 	for fieldname, field_validation in validations.items():
 		value = einvoice.get(fieldname, None)
 		if not value or value == "None":
@@ -424,7 +433,7 @@ def validate_einvoice(validations, einvoice, errors=[]):
 			errors.append(_('{} should not exceed {} characters').format(label, max_length))
 		if value_type == 'number' and (value > maximum or value < minimum):
 			errors.append(_('{} {} should be between {} and {}').format(label, value, minimum, maximum))
-		if pattern_str and not pattern.match(value):
+		if pattern_str and not pattern.match(value) and field_validation.get('validationMsg'):
 			errors.append(field_validation.get('validationMsg'))
 	
 	return errors
@@ -453,13 +462,20 @@ class GSPConnector():
 	def get_credentials(self):
 		if self.invoice:
 			gstin = self.get_seller_gstin()
-			credentials = next(d for d in self.e_invoice_settings.credentials if d.gstin == gstin)
+			if not self.e_invoice_settings.enable:
+				frappe.throw(_("E-Invoicing is disabled. Please enable it from {} to generate e-invoices.").format(get_link_to_form("E Invoice Settings", "E Invoice Settings")))
+
+			credentials_for_gstin = [d for d in self.e_invoice_settings.credentials if d.gstin == gstin]
+			if credentials_for_gstin:
+				credentials = credentials_for_gstin[0]
+			else:
+				frappe.throw(_('Cannot find e-invoicing credentials for GSTIN {}. Please check E-Invoice Settings').format(gstin))
 		else:
 			credentials = self.e_invoice_settings.credentials[0] if self.e_invoice_settings.credentials else None
 		return credentials
 	
 	def get_seller_gstin(self):
-		gstin = self.invoice.company_gstin or frappe.db.get_value('Address', self.invoice.company_address, 'gstin')
+		gstin = frappe.db.get_value('Address', self.invoice.company_address, 'gstin')
 		if not gstin:
 			frappe.throw(_('Cannot retrieve Company GSTIN. Please select company address with valid GSTIN.'))
 		return gstin
