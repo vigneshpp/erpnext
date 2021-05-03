@@ -53,7 +53,9 @@ class BOMUpdateTool(Document):
 			rate=%s, amount=stock_qty*%s where bom_no = %s and docstatus < 2 and parenttype='BOM'""",
 			(self.new_bom, unit_cost, unit_cost, self.current_bom))
 
-	def get_parent_boms(self, bom, bom_list=[]):
+	def get_parent_boms(self, bom, bom_list=None):
+		if bom_list is None:
+			bom_list = []
 		data = frappe.db.sql("""SELECT DISTINCT parent FROM `tabBOM Item`
 			WHERE bom_no = %s AND docstatus < 2 AND parenttype='BOM'""", bom)
 
@@ -90,12 +92,15 @@ def update_latest_price_in_all_boms():
 		update_cost()
 
 def replace_bom(args):
+	frappe.db.auto_commit_on_many_writes = 1
 	args = frappe._dict(args)
 
 	doc = frappe.get_doc("BOM Update Tool")
 	doc.current_bom = args.current_bom
 	doc.new_bom = args.new_bom
 	doc.replace_bom()
+
+	frappe.db.auto_commit_on_many_writes = 0
 
 def update_cost():
 	frappe.db.auto_commit_on_many_writes = 1

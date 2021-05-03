@@ -10,17 +10,18 @@
   "applicant_type",
   "applicant",
   "loan_type",
-  "payment_type",
   "column_break_3",
   "company",
   "posting_date",
   "is_term_loan",
+  "rate_of_interest",
   "payment_details_section",
   "due_date",
   "pending_principal_amount",
   "interest_payable",
   "payable_amount",
   "column_break_9",
+  "shortfall_amount",
   "payable_principal_amount",
   "penalty_amount",
   "amount_paid",
@@ -31,6 +32,8 @@
   "column_break_21",
   "reference_date",
   "principal_amount_paid",
+  "total_penalty_paid",
+  "total_interest_paid",
   "repayment_details",
   "amended_from"
  ],
@@ -96,15 +99,6 @@
    "fieldtype": "Column Break"
   },
   {
-   "default": "Regular Payment",
-   "fieldname": "payment_type",
-   "fieldtype": "Select",
-   "in_list_view": 1,
-   "label": "Payment Type",
-   "options": "\nRegular Payment\nLoan Closure",
-   "reqd": 1
-  },
-  {
    "fieldname": "payable_amount",
    "fieldtype": "Currency",
    "label": "Payable Amount",
@@ -116,6 +110,7 @@
    "fieldname": "amount_paid",
    "fieldtype": "Currency",
    "label": "Amount Paid",
+   "non_negative": 1,
    "options": "Company:company:default_currency",
    "reqd": 1
   },
@@ -173,7 +168,7 @@
   {
    "fieldname": "references_section",
    "fieldtype": "Section Break",
-   "label": "References"
+   "label": "Payment References"
   },
   {
    "fieldname": "reference_number",
@@ -195,6 +190,7 @@
    "fieldtype": "Currency",
    "hidden": 1,
    "label": "Principal Amount Paid",
+   "options": "Company:company:default_currency",
    "read_only": 1
   },
   {
@@ -217,17 +213,49 @@
    "hidden": 1,
    "label": "Repayment Details",
    "options": "Loan Repayment Detail"
+  },
+  {
+   "fieldname": "total_interest_paid",
+   "fieldtype": "Currency",
+   "hidden": 1,
+   "label": "Total Interest Paid",
+   "options": "Company:company:default_currency",
+   "read_only": 1
+  },
+  {
+   "fetch_from": "loan_type.rate_of_interest",
+   "fieldname": "rate_of_interest",
+   "fieldtype": "Percent",
+   "label": "Rate Of Interest",
+   "read_only": 1
+  },
+  {
+   "fieldname": "shortfall_amount",
+   "fieldtype": "Currency",
+   "label": "Shortfall Amount",
+   "options": "Company:company:default_currency",
+   "read_only": 1
+  },
+  {
+   "fieldname": "total_penalty_paid",
+   "fieldtype": "Currency",
+   "hidden": 1,
+   "label": "Total Penalty Paid",
+   "options": "Company:company:default_currency",
+   "read_only": 1
   }
  ],
+ "index_web_pages_for_search": 1,
  "is_submittable": 1,
  "links": [],
- "modified": "2020-04-16 18:14:45.166754",
+ "modified": "2021-04-19 18:10:00.935364",
  "modified_by": "Administrator",
  "module": "Loan Management",
  "name": "Loan Repayment",
  "owner": "Administrator",
  "permissions": [
   {
+   "amend": 1,
    "cancel": 1,
    "create": 1,
    "delete": 1,
@@ -242,6 +270,7 @@
    "write": 1
   },
   {
+   "amend": 1,
    "cancel": 1,
    "create": 1,
    "delete": 1,

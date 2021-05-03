@@ -125,6 +125,7 @@ class InvoiceDiscounting(AccountsController):
 
 		make_gl_entries(gl_entries, cancel=(self.docstatus == 2), update_outstanding='No')
 
+	@frappe.whitelist()
 	def create_disbursement_entry(self):
 		je = frappe.new_doc("Journal Entry")
 		je.voucher_type = 'Journal Entry'
@@ -137,11 +138,12 @@ class InvoiceDiscounting(AccountsController):
 			"cost_center": erpnext.get_default_cost_center(self.company)
 		})
 
-		je.append("accounts", {
-			"account": self.bank_charges_account,
-			"debit_in_account_currency": flt(self.bank_charges),
-			"cost_center": erpnext.get_default_cost_center(self.company)
-		})
+		if self.bank_charges:
+			je.append("accounts", {
+				"account": self.bank_charges_account,
+				"debit_in_account_currency": flt(self.bank_charges),
+				"cost_center": erpnext.get_default_cost_center(self.company)
+			})
 
 		je.append("accounts", {
 			"account": self.short_term_loan,
@@ -173,6 +175,7 @@ class InvoiceDiscounting(AccountsController):
 
 		return je
 
+	@frappe.whitelist()
 	def close_loan(self):
 		je = frappe.new_doc("Journal Entry")
 		je.voucher_type = 'Journal Entry'

@@ -41,7 +41,7 @@ class TherapyType(Document):
 			if self.rate:
 				item_price = frappe.get_doc('Item Price', {'item_code': self.item})
 				item_price.item_name = self.item_name
-				item_price.price_list_name = self.rate
+				item_price.price_list_rate = self.rate
 				item_price.ignore_mandatory = True
 				item_price.save()
 
@@ -50,6 +50,7 @@ class TherapyType(Document):
 
 		self.db_set('change_in_item', 0)
 
+	@frappe.whitelist()
 	def add_exercises(self):
 		exercises = self.get_exercises_for_body_parts()
 		last_idx = max([cint(d.idx) for d in self.get('exercises')] or [0,])

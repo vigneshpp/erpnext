@@ -1,3 +1,4 @@
+
 # Copyright (c) 2015, Frappe Technologies Pvt. Ltd. and Contributors
 # License: GNU General Public License v3. See license.txt
 
@@ -15,6 +16,7 @@ class HolidayList(Document):
 		self.validate_days()
 		self.total_holidays = len(self.holidays)
 
+	@frappe.whitelist()
 	def get_weekly_off_dates(self):
 		self.validate_values()
 		date_list = self.get_weekly_off_date_list(self.from_date, self.to_date)
@@ -32,7 +34,7 @@ class HolidayList(Document):
 
 
 	def validate_days(self):
-		if self.from_date > self.to_date:
+		if getdate(self.from_date) > getdate(self.to_date):
 			throw(_("To Date cannot be before From Date"))
 
 		for day in self.get("holidays"):
@@ -60,6 +62,7 @@ class HolidayList(Document):
 
 		return date_list
 
+	@frappe.whitelist()
 	def clear_table(self):
 		self.set('holidays', [])
 
