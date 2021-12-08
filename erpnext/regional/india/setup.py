@@ -1,7 +1,6 @@
 # Copyright (c) 2015, Frappe Technologies Pvt. Ltd. and Contributors
 # License: GNU General Public License v3. See license.txt
 
-from __future__ import unicode_literals
 
 import json
 import os
@@ -825,7 +824,7 @@ def set_tax_withholding_category(company):
 		accounts = [dict(company=company, account=tds_account)]
 
 	try:
-		fiscal_year_details = get_fiscal_year(today(), verbose=0, company=company)
+		fiscal_year_details = get_fiscal_year(today(), verbose=0)
 	except FiscalYearError:
 		pass
 
