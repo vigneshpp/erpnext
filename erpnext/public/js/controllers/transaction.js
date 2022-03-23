@@ -525,6 +525,7 @@ erpnext.TransactionController = erpnext.taxes_and_totals.extend({
 
 		item.weight_per_unit = 0;
 		item.weight_uom = '';
+		item.conversion_factor = 0;
 
 		if(['Sales Invoice'].includes(this.frm.doc.doctype)) {
 			update_stock = cint(me.frm.doc.update_stock);
@@ -1048,7 +1049,7 @@ erpnext.TransactionController = erpnext.taxes_and_totals.extend({
 		}
 
 		if(flt(this.frm.doc.conversion_rate)>0.0) {
-			if(this.frm.doc.ignore_pricing_rule) {
+			if(this.frm.doc.__onload && this.frm.doc.__onload.ignore_price_list) {
 				this.calculate_taxes_and_totals();
 			} else if (!this.in_apply_price_list){
 				this.apply_price_list();
@@ -1862,6 +1863,7 @@ erpnext.TransactionController = erpnext.taxes_and_totals.extend({
 				callback: function(r) {
 					if(!r.exc) {
 						item.item_tax_rate = r.message;
+						me.add_taxes_from_item_tax_template(item.item_tax_rate);
 						me.calculate_taxes_and_totals();
 					}
 				}
@@ -2264,13 +2266,17 @@ erpnext.TransactionController = erpnext.taxes_and_totals.extend({
 	},
 
 	coupon_code: function() {
-		var me = this;
-		frappe.run_serially([
-			() => this.frm.doc.ignore_pricing_rule=1,
-			() => me.ignore_pricing_rule(),
-			() => this.frm.doc.ignore_pricing_rule=0,
-			() => me.apply_pricing_rule()
-		]);
+		if (this.frm.doc.coupon_code || this.frm._last_coupon_code) {
+			// reset pricing rules if coupon code is set or is unset
+			const _ignore_pricing_rule = this.frm.doc.ignore_pricing_rule;
+			return frappe.run_serially([
+				() => this.frm.doc.ignore_pricing_rule=1,
+				() => this.frm.trigger('ignore_pricing_rule'),
+				() => this.frm.doc.ignore_pricing_rule=_ignore_pricing_rule,
+				() => this.frm.trigger('apply_pricing_rule'),
+				() => this.frm._last_coupon_code = this.frm.doc.coupon_code
+			]);
+		}
 	}
 });
 
