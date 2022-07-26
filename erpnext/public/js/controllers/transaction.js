@@ -572,7 +572,6 @@ erpnext.TransactionController = erpnext.taxes_and_totals.extend({
 							is_pos: cint(me.frm.doc.is_pos),
 							is_return: cint(me.frm.doc.is_return),
 							is_subcontracted: me.frm.doc.is_subcontracted,
-							transaction_date: me.frm.doc.transaction_date || me.frm.doc.posting_date,
 							ignore_pricing_rule: me.frm.doc.ignore_pricing_rule,
 							doctype: me.frm.doc.doctype,
 							name: me.frm.doc.name,
@@ -1035,12 +1034,11 @@ erpnext.TransactionController = erpnext.taxes_and_totals.extend({
 	},
 
 	currency: function() {
-		/* manqala 19/09/2016: let the translation date be whichever of the transaction_date or posting_date is available */
-		var transaction_date = this.frm.doc.transaction_date || this.frm.doc.posting_date;
-		/* end manqala */
-		var me = this;
+		let transaction_date = this.frm.doc.transaction_date || this.frm.doc.posting_date;
+
+		let me = this;
 		this.set_dynamic_labels();
-		var company_currency = this.get_company_currency();
+		let company_currency = this.get_company_currency();
 		// Added `ignore_price_list` to determine if document is loading after mapping from another doc
 		if(this.frm.doc.currency && this.frm.doc.currency !== company_currency
 				&& !(this.frm.doc.__onload && this.frm.doc.__onload.ignore_price_list)) {
@@ -1054,7 +1052,13 @@ erpnext.TransactionController = erpnext.taxes_and_totals.extend({
 					}
 				});
 		} else {
-			this.conversion_rate();
+			// company currency and doc currency is same
+			// this will prevent unnecessary conversion rate triggers
+			if(this.frm.doc.currency === this.get_company_currency()) {
+				this.frm.set_value("conversion_rate", 1.0);
+			} else {
+				this.conversion_rate();
+			}
 		}
 	},
 
@@ -1219,9 +1223,25 @@ erpnext.TransactionController = erpnext.taxes_and_totals.extend({
 		}
 	},
 
+	is_a_mapped_document(item) {
+		const mapped_item_field_map = {
+			"Delivery Note Item": ["si_detail", "so_detail", "dn_detail"],
+			"Sales Invoice Item": ["dn_detail", "so_detail", "sales_invoice_item"],
+			"Purchase Receipt Item": ["purchase_order_item", "purchase_invoice_item", "purchase_receipt_item"],
+			"Purchase Invoice Item": ["purchase_order_item", "pr_detail", "po_detail"],
+		};
+		const mappped_fields = mapped_item_field_map[item.doctype] || [];
+
+		return mappped_fields
+			.map((field) => item[field])
+			.filter(Boolean).length > 0;
+	},
+
 	batch_no: function(doc, cdt, cdn) {
 		let item = frappe.get_doc(cdt, cdn);
-		this.apply_price_list(item, true);
+		if (!this.is_a_mapped_document(item)) {
+			this.apply_price_list(item, true);
+		}
 	},
 
 	toggle_conversion_factor: function(item) {
@@ -1496,12 +1516,15 @@ erpnext.TransactionController = erpnext.taxes_and_totals.extend({
 		var me = this;
 		var args = this._get_args(item);
 		if (!(args.items && args.items.length)) {
-			if(calculate_taxes_and_totals) me.calculate_taxes_and_totals();
+			if (calculate_taxes_and_totals) me.calculate_taxes_and_totals();
 			return;
 		}
 
 		// Target doc created from a mapped doc
 		if (this.frm.doc.__onload && this.frm.doc.__onload.ignore_price_list) {
+			// Calculate totals even though pricing rule is not applied.
+			// `apply_pricing_rule` is triggered due to change in data which most likely contributes to Total.
+			if (calculate_taxes_and_totals) me.calculate_taxes_and_totals();
 			return;
 		}
 

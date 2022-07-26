@@ -30,7 +30,10 @@ from erpnext.controllers.accounts_controller import (
 	get_supplier_block_status,
 	validate_taxes_and_charges,
 )
-from erpnext.hr.doctype.expense_claim.expense_claim import update_reimbursed_amount
+from erpnext.hr.doctype.expense_claim.expense_claim import (
+	get_outstanding_amount_for_claim,
+	update_reimbursed_amount,
+)
 from erpnext.setup.utils import get_exchange_rate
 
 
@@ -355,6 +358,12 @@ class PaymentEntry(AccountsController):
 								_("{0} {1} is associated with {2}, but Party Account is {3}").format(
 									d.reference_doctype, d.reference_name, ref_party_account, self.party_account
 								)
+							)
+
+						if ref_doc.doctype == "Purchase Invoice" and ref_doc.get("on_hold"):
+							frappe.throw(
+								_("{0} {1} is on hold").format(d.reference_doctype, d.reference_name),
+								title=_("Invalid Invoice"),
 							)
 
 					if ref_doc.docstatus != 1:
@@ -1643,12 +1652,7 @@ def get_reference_details(reference_doctype, reference_name, party_account_curre
 			outstanding_amount = ref_doc.get("outstanding_amount")
 			bill_no = ref_doc.get("bill_no")
 		elif reference_doctype == "Expense Claim":
-			outstanding_amount = (
-				flt(ref_doc.get("total_sanctioned_amount"))
-				+ flt(ref_doc.get("total_taxes_and_charges"))
-				- flt(ref_doc.get("total_amount_reimbursed"))
-				- flt(ref_doc.get("total_advance_amount"))
-			)
+			outstanding_amount = get_outstanding_amount_for_claim(ref_doc)
 		elif reference_doctype == "Employee Advance":
 			outstanding_amount = flt(ref_doc.advance_amount) - flt(ref_doc.paid_amount)
 			if party_account_currency != ref_doc.currency:

@@ -468,6 +468,7 @@ class PurchaseReceipt(BuyingController):
 				and not d.is_fixed_asset
 				and flt(d.qty)
 				and provisional_accounting_for_non_stock_items
+				and d.get("provisional_expense_account")
 			):
 				self.add_provisional_gl_entry(
 					d, gl_entries, self.posting_date, d.get("provisional_expense_account")
@@ -993,6 +994,7 @@ def make_stock_entry(source_name, target_doc=None):
 	def set_missing_values(source, target):
 		target.stock_entry_type = "Material Transfer"
 		target.purpose = "Material Transfer"
+		target.set_missing_values()
 
 	doclist = get_mapped_doc(
 		"Purchase Receipt",
