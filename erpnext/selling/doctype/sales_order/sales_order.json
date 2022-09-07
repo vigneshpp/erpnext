@@ -25,6 +25,10 @@
   "po_no",
   "po_date",
   "tax_id",
+  "accounting_dimensions_section",
+  "cost_center",
+  "dimension_col_break",
+  "project",
   "contact_info",
   "customer_address",
   "address_display",
@@ -38,6 +42,8 @@
   "col_break46",
   "shipping_address_name",
   "shipping_address",
+  "dispatch_address_name",
+  "dispatch_address",
   "customer_group",
   "territory",
   "currency_and_price_list",
@@ -53,6 +59,8 @@
   "items_section",
   "scan_barcode",
   "items",
+  "packing_list",
+  "packed_items",
   "pricing_rule_details",
   "pricing_rules",
   "section_break_31",
@@ -99,8 +107,6 @@
   "in_words",
   "advance_paid",
   "disable_rounded_total",
-  "packing_list",
-  "packed_items",
   "payment_schedule_section",
   "payment_terms_template",
   "payment_schedule",
@@ -111,7 +117,6 @@
   "is_internal_customer",
   "represents_company",
   "inter_company_order_reference",
-  "project",
   "party_account_currency",
   "column_break_77",
   "source",
@@ -128,10 +133,12 @@
   "per_delivered",
   "column_break_81",
   "per_billed",
+  "per_picked",
   "billing_status",
   "sales_team_section_break",
   "sales_partner",
   "column_break7",
+  "amount_eligible_for_commission",
   "commission_rate",
   "total_commission",
   "section_break1",
@@ -569,7 +576,8 @@
    "fieldtype": "Data",
    "hide_days": 1,
    "hide_seconds": 1,
-   "label": "Scan Barcode"
+   "label": "Scan Barcode",
+   "options": "Barcode"
   },
   {
    "allow_bulk_edit": 1,
@@ -1016,6 +1024,7 @@
   {
    "collapsible": 1,
    "collapsible_depends_on": "packed_items",
+   "depends_on": "packed_items",
    "fieldname": "packing_list",
    "fieldtype": "Section Break",
    "hide_days": 1,
@@ -1026,14 +1035,14 @@
    "print_hide": 1
   },
   {
+   "depends_on": "packed_items",
    "fieldname": "packed_items",
    "fieldtype": "Table",
    "hide_days": 1,
    "hide_seconds": 1,
    "label": "Packed Items",
    "options": "Packed Item",
-   "print_hide": 1,
-   "read_only": 1
+   "print_hide": 1
   },
   {
    "fieldname": "payment_schedule_section",
@@ -1350,6 +1359,8 @@
    "width": "50%"
   },
   {
+   "fetch_from": "sales_partner.commission_rate",
+   "fetch_if_empty": 1,
    "fieldname": "commission_rate",
    "fieldtype": "Float",
    "hide_days": 1,
@@ -1476,6 +1487,7 @@
    "fetch_from": "customer.represents_company",
    "fieldname": "represents_company",
    "fieldtype": "Link",
+   "ignore_user_permissions": 1,
    "label": "Represents Company",
    "options": "Company",
    "read_only": 1
@@ -1486,16 +1498,62 @@
    "fieldname": "disable_rounded_total",
    "fieldtype": "Check",
    "label": "Disable Rounded Total"
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "dispatch_address_name",
+   "fieldtype": "Link",
+   "label": "Dispatch Address Name",
+   "options": "Address",
+   "print_hide": 1
+  },
+  {
+   "allow_on_submit": 1,
+   "depends_on": "dispatch_address_name",
+   "fieldname": "dispatch_address",
+   "fieldtype": "Small Text",
+   "label": "Dispatch Address",
+   "read_only": 1
+  },
+  {
+   "fieldname": "amount_eligible_for_commission",
+   "fieldtype": "Currency",
+   "label": "Amount Eligible for Commission",
+   "read_only": 1
+  },
+  {
+   "fieldname": "per_picked",
+   "fieldtype": "Percent",
+   "label": "% Picked",
+   "no_copy": 1,
+   "read_only": 1
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "accounting_dimensions_section",
+   "fieldtype": "Section Break",
+   "label": "Accounting Dimensions"
+  },
+  {
+   "fieldname": "cost_center",
+   "fieldtype": "Link",
+   "label": "Cost Center",
+   "options": "Cost Center"
+  },
+  {
+   "fieldname": "dimension_col_break",
+   "fieldtype": "Column Break"
   }
  ],
  "icon": "fa fa-file-text",
  "idx": 105,
  "is_submittable": 1,
  "links": [],
- "modified": "2021-04-15 23:55:13.439068",
+ "modified": "2022-06-10 03:52:22.212953",
  "modified_by": "Administrator",
  "module": "Selling",
  "name": "Sales Order",
+ "naming_rule": "By \"Naming Series\" field",
  "owner": "Administrator",
  "permissions": [
   {
@@ -1565,6 +1623,7 @@
  "show_name_in_global_search": 1,
  "sort_field": "modified",
  "sort_order": "DESC",
+ "states": [],
  "timeline_field": "customer",
  "title_field": "customer_name",
  "track_changes": 1,

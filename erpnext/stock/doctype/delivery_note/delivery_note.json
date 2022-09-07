@@ -23,6 +23,10 @@
   "is_return",
   "issue_credit_note",
   "return_against",
+  "accounting_dimensions_section",
+  "cost_center",
+  "dimension_col_break",
+  "project",
   "customer_po_details",
   "po_no",
   "column_break_17",
@@ -32,6 +36,8 @@
   "contact_info",
   "shipping_address_name",
   "shipping_address",
+  "dispatch_address_name",
+  "dispatch_address",
   "contact_person",
   "contact_display",
   "contact_mobile",
@@ -113,7 +119,6 @@
   "driver_name",
   "lr_date",
   "more_info",
-  "project",
   "campaign",
   "source",
   "column_break5",
@@ -143,6 +148,7 @@
   "sales_team_section_break",
   "sales_partner",
   "column_break7",
+  "amount_eligible_for_commission",
   "commission_rate",
   "total_commission",
   "section_break1",
@@ -393,8 +399,7 @@
    "fieldtype": "Link",
    "label": "Billing Address Name",
    "options": "Address",
-   "print_hide": 1,
-   "read_only": 1
+   "print_hide": 1
   },
   {
    "fieldname": "tax_id",
@@ -513,7 +518,8 @@
   {
    "fieldname": "scan_barcode",
    "fieldtype": "Data",
-   "label": "Scan Barcode"
+   "label": "Scan Barcode",
+   "options": "Barcode"
   },
   {
    "allow_bulk_edit": 1,
@@ -540,6 +546,7 @@
   {
    "collapsible": 1,
    "collapsible_depends_on": "packed_items",
+   "depends_on": "packed_items",
    "fieldname": "packing_list",
    "fieldtype": "Section Break",
    "label": "Packing List",
@@ -548,6 +555,7 @@
    "print_hide": 1
   },
   {
+   "depends_on": "packed_items",
    "fieldname": "packed_items",
    "fieldtype": "Table",
    "label": "Packed Items",
@@ -1184,6 +1192,8 @@
    "width": "50%"
   },
   {
+   "fetch_from": "sales_partner.commission_rate",
+   "fetch_if_empty": 1,
    "fieldname": "commission_rate",
    "fieldtype": "Float",
    "label": "Commission Rate (%)",
@@ -1272,6 +1282,7 @@
    "fetch_from": "customer.represents_company",
    "fieldname": "represents_company",
    "fieldtype": "Link",
+   "ignore_user_permissions": 1,
    "label": "Represents Company",
    "options": "Company",
    "read_only": 1
@@ -1282,16 +1293,54 @@
    "fieldname": "disable_rounded_total",
    "fieldtype": "Check",
    "label": "Disable Rounded Total"
+  },
+  {
+   "fieldname": "dispatch_address_name",
+   "fieldtype": "Link",
+   "label": "Dispatch Address Name",
+   "options": "Address",
+   "print_hide": 1
+  },
+  {
+   "depends_on": "dispatch_address_name",
+   "fieldname": "dispatch_address",
+   "fieldtype": "Small Text",
+   "label": "Dispatch Address",
+   "print_hide": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "amount_eligible_for_commission",
+   "fieldtype": "Currency",
+   "label": "Amount Eligible for Commission",
+   "read_only": 1
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "accounting_dimensions_section",
+   "fieldtype": "Section Break",
+   "label": "Accounting Dimensions"
+  },
+  {
+   "fieldname": "cost_center",
+   "fieldtype": "Link",
+   "label": "Cost Center",
+   "options": "Cost Center"
+  },
+  {
+   "fieldname": "dimension_col_break",
+   "fieldtype": "Column Break"
   }
  ],
  "icon": "fa fa-truck",
  "idx": 146,
  "is_submittable": 1,
  "links": [],
- "modified": "2021-06-11 19:27:30.901112",
+ "modified": "2022-06-10 03:52:04.197415",
  "modified_by": "Administrator",
  "module": "Stock",
  "name": "Delivery Note",
+ "naming_rule": "By \"Naming Series\" field",
  "owner": "Administrator",
  "permissions": [
   {
@@ -1352,6 +1401,7 @@
  "show_name_in_global_search": 1,
  "sort_field": "modified",
  "sort_order": "DESC",
+ "states": [],
  "timeline_field": "customer",
  "title_field": "title",
  "track_changes": 1,

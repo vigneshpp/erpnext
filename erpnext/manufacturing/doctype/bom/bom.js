@@ -81,9 +81,9 @@ frappe.ui.form.on("BOM", {
 			}
 		)
 
-		if (!frm.doc.__islocal && frm.doc.docstatus<2) {
+		if (!frm.is_new() && frm.doc.docstatus<2) {
 			frm.add_custom_button(__("Update Cost"), function() {
-				frm.events.update_cost(frm);
+				frm.events.update_cost(frm, true);
 			});
 			frm.add_custom_button(__("Browse BOM"), function() {
 				frappe.route_options = {
@@ -93,7 +93,14 @@ frappe.ui.form.on("BOM", {
 			});
 		}
 
-		if(frm.doc.docstatus!=0) {
+		if (!frm.is_new() && !frm.doc.docstatus == 0) {
+			frm.add_custom_button(__("New Version"), function() {
+				let new_bom = frappe.model.copy_doc(frm.doc);
+				frappe.set_route("Form", "BOM", new_bom.name);
+			});
+		}
+
+		if(frm.doc.docstatus==1) {
 			frm.add_custom_button(__("Work Order"), function() {
 				frm.trigger("make_work_order");
 			}, __("Create"));
@@ -215,7 +222,32 @@ frappe.ui.form.on("BOM", {
 				label: __('Qty To Manufacture'),
 				fieldname: 'qty',
 				reqd: 1,
-				default: 1
+				default: 1,
+				onchange: () => {
+					const { quantity, items: rm } = frm.doc;
+					const variant_items_map = rm.reduce((acc, item) => {
+						acc[item.item_code] = item.qty;
+						return acc;
+					}, {});
+					const mf_qty = cur_dialog.fields_list.filter(
+						(f) => f.df.fieldname === "qty"
+					)[0]?.value;
+					const items = cur_dialog.fields.filter(
+						(f) => f.fieldname === "items"
+					)[0]?.data;
+
+					if (!items) {
+						return;
+					}
+
+					items.forEach((item) => {
+						item.qty =
+							(variant_items_map[item.item_code] * mf_qty) /
+							quantity;
+					});
+
+					cur_dialog.refresh();
+				}
 			});
 		}
 
@@ -235,7 +267,7 @@ frappe.ui.form.on("BOM", {
 						reqd: 1,
 					},
 					{
-						fieldname: "varint_item_code",
+						fieldname: "variant_item_code",
 						options: "Item",
 						label: __("Variant Item"),
 						fieldtype: "Link",
@@ -287,7 +319,7 @@ frappe.ui.form.on("BOM", {
 			let variant_items = data.items || [];
 
 			variant_items.forEach(d => {
-				if (!d.varint_item_code) {
+				if (!d.variant_item_code) {
 					frappe.throw(__("Select variant item code for the template item {0}", [d.item_code]));
 				}
 			})
@@ -299,14 +331,14 @@ frappe.ui.form.on("BOM", {
 		has_template_rm.forEach(d => {
 			dialog.fields_dict.items.df.data.push({
 				"item_code": d.item_code,
-				"varint_item_code": "",
+				"variant_item_code": "",
 				"qty": d.qty,
 				"source_warehouse": d.source_warehouse,
 				"operation": d.operation
 			});
 		});
 
-		if (has_template_rm) {
+		if (has_template_rm && has_template_rm.length) {
 			dialog.fields_dict.items.grid.refresh();
 		}
 	},
@@ -318,14 +350,15 @@ frappe.ui.form.on("BOM", {
 		})
 	},
 
-	update_cost: function(frm) {
+	update_cost: function(frm, save_doc=false) {
 		return frappe.call({
 			doc: frm.doc,
 			method: "update_cost",
 			freeze: true,
 			args: {
 				update_parent: true,
-				from_child_bom:false
+				save: save_doc,
+				from_child_bom: false
 			},
 			callback: function(r) {
 				refresh_field("items");
@@ -441,10 +474,16 @@ var get_bom_material_detail = function(doc, cdt, cdn, scrap_items) {
 				"uom": d.uom,
 				"stock_uom": d.stock_uom,
 				"conversion_factor": d.conversion_factor,
-				"sourced_by_supplier": d.sourced_by_supplier
+				"sourced_by_supplier": d.sourced_by_supplier,
+				"do_not_explode": d.do_not_explode
 			},
 			callback: function(r) {
 				d = locals[cdt][cdn];
+				if (d.is_process_loss) {
+					r.message.rate = 0;
+					r.message.base_rate = 0;
+				}
+
 				$.extend(d, r.message);
 				refresh_field("items");
 				refresh_field("scrap_items");
@@ -467,15 +506,11 @@ cur_frm.cscript.qty = function(doc) {
 
 cur_frm.cscript.rate = function(doc, cdt, cdn) {
 	var d = locals[cdt][cdn];
-	var scrap_items = false;
-
-	if(cdt == 'BOM Scrap Item') {
-		scrap_items = true;
-	}
+	const is_scrap_item = cdt == "BOM Scrap Item";
 
 	if (d.bom_no) {
 		frappe.msgprint(__("You cannot change the rate if BOM is mentioned against any Item."));
-		get_bom_material_detail(doc, cdt, cdn, scrap_items);
+		get_bom_material_detail(doc, cdt, cdn, is_scrap_item);
 	} else {
 		erpnext.bom.calculate_rm_cost(doc);
 		erpnext.bom.calculate_scrap_materials_cost(doc);
@@ -609,6 +644,13 @@ frappe.ui.form.on("BOM Operation", "workstation", function(frm, cdt, cdn) {
 	});
 });
 
+frappe.ui.form.on("BOM Item", {
+	do_not_explode: function(frm, cdt, cdn) {
+		get_bom_material_detail(frm.doc, cdt, cdn, false);
+	}
+})
+
+
 frappe.ui.form.on("BOM Item", "qty", function(frm, cdt, cdn) {
 	var d = locals[cdt][cdn];
 	d.stock_qty = d.qty * d.conversion_factor;
@@ -649,8 +691,57 @@ frappe.ui.form.on("BOM Item", "items_remove", function(frm) {
 	erpnext.bom.calculate_total(frm.doc);
 });
 
-frappe.ui.form.on("BOM", "with_operations", function(frm) {
-	if(!cint(frm.doc.with_operations)) {
-		frm.set_value("operations", []);
+frappe.tour['BOM'] = [
+	{
+		fieldname: "item",
+		title: "Item",
+		description: __("Select the Item to be manufactured. The Item name, UoM, Company, and Currency will be fetched automatically.")
+	},
+	{
+		fieldname: "quantity",
+		title: "Quantity",
+		description: __("Enter the quantity of the Item that will be manufactured from this Bill of Materials.")
+	},
+	{
+		fieldname: "with_operations",
+		title: "With Operations",
+		description: __("To add Operations tick the 'With Operations' checkbox.")
+	},
+	{
+		fieldname: "items",
+		title: "Raw Materials",
+		description: __("Select the raw materials (Items) required to manufacture the Item")
 	}
+];
+
+frappe.ui.form.on("BOM Scrap Item", {
+	item_code(frm, cdt, cdn) {
+		const { item_code } = locals[cdt][cdn];
+		if (item_code === frm.doc.item) {
+			locals[cdt][cdn].is_process_loss = 1;
+			trigger_process_loss_qty_prompt(frm, cdt, cdn, item_code);
+		}
+	},
 });
+
+function trigger_process_loss_qty_prompt(frm, cdt, cdn, item_code) {
+	frappe.prompt(
+		{
+			fieldname: "percent",
+			fieldtype: "Percent",
+			label: __("% Finished Item Quantity"),
+			description:
+				__("Set quantity of process loss item:") +
+				` ${item_code} ` +
+				__("as a percentage of finished item quantity"),
+		},
+		(data) => {
+			const row = locals[cdt][cdn];
+			row.stock_qty = (frm.doc.quantity * data.percent) / 100;
+			row.qty = row.stock_qty / (row.conversion_factor || 1);
+			refresh_field("scrap_items");
+		},
+		__("Set Process Loss Item Quantity"),
+		__("Set Quantity")
+	);
+}

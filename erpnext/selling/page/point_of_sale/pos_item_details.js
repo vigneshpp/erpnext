@@ -28,7 +28,7 @@ erpnext.PointOfSale.ItemDetails = class {
 	init_child_components() {
 		this.$component.html(
 			`<div class="item-details-header">
-				<div class="label">Item Details</div>
+				<div class="label">${__('Item Details')}</div>
 				<div class="close-btn">
 					<svg width="32" height="32" viewBox="0 0 14 14" fill="none">
 						<path d="M4.93764 4.93759L7.00003 6.99998M9.06243 9.06238L7.00003 6.99998M7.00003 6.99998L4.93764 9.06238L9.06243 4.93759" stroke="#8D99A6"/>
@@ -60,12 +60,18 @@ erpnext.PointOfSale.ItemDetails = class {
 		return item && item.name == this.current_item.name;
 	}
 
-	toggle_item_details_section(item) {
+	async toggle_item_details_section(item) {
 		const current_item_changed = !this.compare_with_current_item(item);
 
 		// if item is null or highlighted cart item is clicked twice
 		const hide_item_details = !Boolean(item) || !current_item_changed;
-		
+
+		if ((!hide_item_details && current_item_changed) || hide_item_details) {
+			// if item details is being closed OR if item details is opened but item is changed
+			// in both cases, if the current item is a serialized item, then validate and remove the item
+			await this.validate_serial_batch_item();
+		}
+
 		this.events.toggle_item_selector(!hide_item_details);
 		this.toggle_component(!hide_item_details);
 
@@ -83,7 +89,6 @@ erpnext.PointOfSale.ItemDetails = class {
 			this.render_form(item);
 			this.events.highlight_cart_item(item);
 		} else {
-			this.validate_serial_batch_item();
 			this.current_item = {};
 		}
 	}
@@ -103,11 +108,11 @@ erpnext.PointOfSale.ItemDetails = class {
 			(serialized && batched && (no_batch_selected || no_serial_selected))) {
 
 			frappe.show_alert({
-				message: __("Item will be removed since no serial / batch no selected."),
+				message: __("Item is removed since no serial / batch no selected."),
 				indicator: 'orange'
 			});
 			frappe.utils.play_sound("cancel");
-			this.events.remove_item_from_cart();
+			return this.events.remove_item_from_cart();
 		}
 	}
 
@@ -127,7 +132,7 @@ erpnext.PointOfSale.ItemDetails = class {
 		this.$item_price.html(format_currency(price_list_rate, this.currency));
 		if (!this.hide_images && image) {
 			this.$item_image.html(
-				`<img 
+				`<img
 					onerror="cur_pos.item_details.handle_broken_image(this)"
 					class="h-full" src="${image}"
 					alt="${frappe.get_abbr(item_name)}"
@@ -201,8 +206,9 @@ erpnext.PointOfSale.ItemDetails = class {
 					`<div class="grid-filler no-select"></div>`
 				);
 			}
+			const label = __('Auto Fetch Serial Numbers');
 			this.$form_container.append(
-				`<div class="btn btn-sm btn-secondary auto-fetch-btn">Auto Fetch Serial Numbers</div>`
+				`<div class="btn btn-sm btn-secondary auto-fetch-btn">${label}</div>`
 			);
 			this.$form_container.find('.serial_no-control').find('textarea').css('height', '6rem');
 		}
@@ -236,7 +242,7 @@ erpnext.PointOfSale.ItemDetails = class {
 				if (this.value) {
 					me.events.form_updated(me.current_item, 'warehouse', this.value).then(() => {
 						me.item_stock_map = me.events.get_item_stock_map();
-						const available_qty = me.item_stock_map[me.item_row.item_code][this.value];
+						const available_qty = me.item_stock_map[me.item_row.item_code] && me.item_stock_map[me.item_row.item_code][this.value];
 						if (available_qty === undefined) {
 							me.events.get_available_stock(me.item_row.item_code, this.value).then(() => {
 								// item stock map is updated now reset warehouse
