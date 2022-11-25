@@ -62,7 +62,6 @@ class PaymentEntry(AccountsController):
 		self.set_missing_values()
 		self.validate_payment_type()
 		self.validate_party_details()
-		self.validate_bank_accounts()
 		self.set_exchange_rate()
 		self.validate_mandatory()
 		self.validate_reference_documents()
@@ -242,23 +241,6 @@ class PaymentEntry(AccountsController):
 		if self.party:
 			if not frappe.db.exists(self.party_type, self.party):
 				frappe.throw(_("Invalid {0}: {1}").format(self.party_type, self.party))
-
-			if self.party_account and self.party_type in ("Customer", "Supplier"):
-				self.validate_account_type(
-					self.party_account, [erpnext.get_party_account_type(self.party_type)]
-				)
-
-	def validate_bank_accounts(self):
-		if self.payment_type in ("Pay", "Internal Transfer"):
-			self.validate_account_type(self.paid_from, ["Bank", "Cash"])
-
-		if self.payment_type in ("Receive", "Internal Transfer"):
-			self.validate_account_type(self.paid_to, ["Bank", "Cash"])
-
-	def validate_account_type(self, account, account_types):
-		account_type = frappe.db.get_value("Account", account, "account_type")
-		# if account_type not in account_types:
-		# 	frappe.throw(_("Account Type for {0} must be {1}").format(account, comma_or(account_types)))
 
 	def set_exchange_rate(self, ref_doc=None):
 		self.set_source_exchange_rate(ref_doc)
@@ -743,7 +725,7 @@ class PaymentEntry(AccountsController):
 
 	def validate_transaction_reference(self):
 		bank_account = self.paid_to if self.payment_type == "Receive" else self.paid_from
-		bank_account_type = frappe.db.get_value("Account", bank_account, "account_type")
+		bank_account_type = frappe.get_cached_value("Account", bank_account, "account_type")
 
 		if bank_account_type == "Bank":
 			if not self.reference_no or not self.reference_date:
@@ -940,6 +922,13 @@ class PaymentEntry(AccountsController):
 			)
 
 			if not d.included_in_paid_amount:
+				if get_account_currency(payment_account) != self.company_currency:
+					if self.payment_type == "Receive":
+						exchange_rate = self.target_exchange_rate
+					elif self.payment_type in ["Pay", "Internal Transfer"]:
+						exchange_rate = self.source_exchange_rate
+					base_tax_amount = flt((tax_amount / exchange_rate), self.precision("paid_amount"))
+
 				gl_entries.append(
 					self.get_gl_dict(
 						{
@@ -988,7 +977,9 @@ class PaymentEntry(AccountsController):
 		if self.payment_type in ("Receive", "Pay") and self.party:
 			for d in self.get("references"):
 				if d.allocated_amount and d.reference_doctype in frappe.get_hooks("advance_payment_doctypes"):
-					frappe.get_doc(d.reference_doctype, d.reference_name).set_total_advance_paid()
+					frappe.get_doc(
+						d.reference_doctype, d.reference_name, for_update=True
+					).set_total_advance_paid()
 
 	def on_recurring(self, reference_doc, auto_repeat_doc):
 		self.reference_no = reference_doc.name
@@ -1033,7 +1024,7 @@ class PaymentEntry(AccountsController):
 			for fieldname in tax_fields:
 				tax.set(fieldname, 0.0)
 
-		self.paid_amount_after_tax = self.paid_amount
+		self.paid_amount_after_tax = self.base_paid_amount
 
 	def determine_exclusive_rate(self):
 		if not any(cint(tax.included_in_paid_amount) for tax in self.get("taxes")):
@@ -1052,7 +1043,7 @@ class PaymentEntry(AccountsController):
 
 			cumulated_tax_fraction += tax.tax_fraction_for_current_item
 
-		self.paid_amount_after_tax = flt(self.paid_amount / (1 + cumulated_tax_fraction))
+		self.paid_amount_after_tax = flt(self.base_paid_amount / (1 + cumulated_tax_fraction))
 
 	def calculate_taxes(self):
 		self.total_taxes_and_charges = 0.0
@@ -1075,7 +1066,7 @@ class PaymentEntry(AccountsController):
 					current_tax_amount += actual_tax_dict[tax.idx]
 
 			tax.tax_amount = current_tax_amount
-			tax.base_tax_amount = tax.tax_amount * self.source_exchange_rate
+			tax.base_tax_amount = current_tax_amount
 
 			if tax.add_deduct_tax == "Deduct":
 				current_tax_amount *= -1.0
@@ -1089,14 +1080,20 @@ class PaymentEntry(AccountsController):
 					self.get("taxes")[i - 1].total + current_tax_amount, self.precision("total", tax)
 				)
 
-			tax.base_total = tax.total * self.source_exchange_rate
+			tax.base_total = tax.total
 
 			if self.payment_type == "Pay":
-				self.base_total_taxes_and_charges += flt(current_tax_amount / self.source_exchange_rate)
-				self.total_taxes_and_charges += flt(current_tax_amount / self.target_exchange_rate)
-			else:
-				self.base_total_taxes_and_charges += flt(current_tax_amount / self.target_exchange_rate)
-				self.total_taxes_and_charges += flt(current_tax_amount / self.source_exchange_rate)
+				if tax.currency != self.paid_to_account_currency:
+					self.total_taxes_and_charges += flt(current_tax_amount / self.target_exchange_rate)
+				else:
+					self.total_taxes_and_charges += current_tax_amount
+			elif self.payment_type == "Receive":
+				if tax.currency != self.paid_from_account_currency:
+					self.total_taxes_and_charges += flt(current_tax_amount / self.source_exchange_rate)
+				else:
+					self.total_taxes_and_charges += current_tax_amount
+
+			self.base_total_taxes_and_charges += tax.base_tax_amount
 
 		if self.get("taxes"):
 			self.paid_amount_after_tax = self.get("taxes")[-1].base_total
@@ -1306,7 +1303,7 @@ def split_invoices_based_on_payment_terms(outstanding_invoices):
 				d.voucher_type, d.voucher_no, "payment_terms_template"
 			)
 			if payment_term_template:
-				allocate_payment_based_on_payment_terms = frappe.db.get_value(
+				allocate_payment_based_on_payment_terms = frappe.get_cached_value(
 					"Payment Terms Template", payment_term_template, "allocate_payment_based_on_payment_terms"
 				)
 				if allocate_payment_based_on_payment_terms:
@@ -1538,7 +1535,7 @@ def get_account_details(account, date, cost_center=None):
 		{
 			"account_currency": get_account_currency(account),
 			"account_balance": account_balance,
-			"account_type": frappe.db.get_value("Account", account, "account_type"),
+			"account_type": frappe.get_cached_value("Account", account, "account_type"),
 		}
 	)
 
@@ -1707,9 +1704,9 @@ def get_payment_entry(
 	if doc.doctype == "Purchase Invoice" and doc.invoice_is_blocked():
 		frappe.msgprint(_("{0} is on hold till {1}").format(doc.name, doc.release_date))
 	else:
-		if doc.doctype in ("Sales Invoice", "Purchase Invoice") and frappe.get_value(
+		if doc.doctype in ("Sales Invoice", "Purchase Invoice") and frappe.get_cached_value(
 			"Payment Terms Template",
-			{"name": doc.payment_terms_template},
+			doc.payment_terms_template,
 			"allocate_payment_based_on_payment_terms",
 		):
 

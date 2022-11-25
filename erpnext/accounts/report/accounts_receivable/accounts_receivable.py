@@ -748,7 +748,7 @@ class ReceivablePayableReport(object):
 
 		self.add_accounting_dimensions_filters()
 
-	def get_cost_center_conditions(self, conditions):
+	def get_cost_center_conditions(self):
 		lft, rgt = frappe.db.get_value("Cost Center", self.filters.cost_center, ["lft", "rgt"])
 		cost_center_list = [
 			center.name
@@ -784,7 +784,7 @@ class ReceivablePayableReport(object):
 	def add_customer_filters(
 		self,
 	):
-		self.customter = qb.DocType("Customer")
+		self.customer = qb.DocType("Customer")
 
 		if self.filters.get("customer_group"):
 			self.get_hierarchical_filters("Customer Group", "customer_group")
@@ -838,7 +838,7 @@ class ReceivablePayableReport(object):
 		customer = self.customer
 		groups = qb.from_(doc).select(doc.name).where((doc.lft >= lft) & (doc.rgt <= rgt))
 		customers = qb.from_(customer).select(customer.name).where(customer[key].isin(groups))
-		self.qb_selection_filter.append(ple.isin(ple.party.isin(customers)))
+		self.qb_selection_filter.append(ple.party.isin(customers))
 
 	def add_accounting_dimensions_filters(self):
 		accounting_dimensions = get_accounting_dimensions(as_list=False)
@@ -1009,7 +1009,7 @@ class ReceivablePayableReport(object):
 				"{range3}-{range4}".format(
 					range3=cint(self.filters["range3"]) + 1, range4=self.filters["range4"]
 				),
-				"{range4}-{above}".format(range4=cint(self.filters["range4"]) + 1, above=_("Above")),
+				_("{range4}-Above").format(range4=cint(self.filters["range4"]) + 1),
 			]
 		):
 			self.add_column(label=label, fieldname="range" + str(i + 1))
