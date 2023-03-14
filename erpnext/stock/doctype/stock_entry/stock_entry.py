@@ -1262,7 +1262,9 @@ class StockEntry(StockController):
 			and ret.get("has_batch_no")
 			and not args.get("batch_no")
 		):
-			args.batch_no = get_batch_no(args["item_code"], args["s_warehouse"], args["qty"])
+			args.batch_no = get_batch_no(args["item_code"], args["s_warehouse"], args["qty"]).get(
+				"batch_no", None
+			)
 
 		if (
 			self.purpose == "Send to Subcontractor" and self.get("purchase_order") and args.get("item_code")
@@ -2440,7 +2442,7 @@ def get_uom_details(item_code, uom, qty):
 
 	if not conversion_factor:
 		frappe.msgprint(
-			_("UOM coversion factor required for UOM: {0} in Item: {1}").format(uom, item_code)
+			_("UOM conversion factor required for UOM: {0} in Item: {1}").format(uom, item_code)
 		)
 		ret = {"uom": ""}
 	else:

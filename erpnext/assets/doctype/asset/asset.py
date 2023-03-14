@@ -84,13 +84,54 @@ class Asset(AccountsController):
 		if self.calculate_depreciation:
 			self.value_after_depreciation = 0
 			self.set_depreciation_rate()
-			self.make_depreciation_schedule(date_of_disposal)
-			self.set_accumulated_depreciation(date_of_disposal, date_of_return)
+			if self.should_prepare_depreciation_schedule():
+				self.make_depreciation_schedule(date_of_disposal)
+				self.set_accumulated_depreciation(date_of_disposal, date_of_return)
 		else:
 			self.finance_books = []
 			self.value_after_depreciation = flt(self.gross_purchase_amount) - flt(
 				self.opening_accumulated_depreciation
 			)
+
+	def should_prepare_depreciation_schedule(self):
+		if not self.get("schedules"):
+			return True
+
+		old_asset_doc = self.get_doc_before_save()
+
+		if not old_asset_doc:
+			return True
+
+		have_asset_details_been_modified = (
+			old_asset_doc.gross_purchase_amount != self.gross_purchase_amount
+			or old_asset_doc.opening_accumulated_depreciation != self.opening_accumulated_depreciation
+			or old_asset_doc.number_of_depreciations_booked != self.number_of_depreciations_booked
+		)
+
+		if have_asset_details_been_modified:
+			return True
+
+		manual_fb_idx = -1
+		for d in self.finance_books:
+			if d.depreciation_method == "Manual":
+				manual_fb_idx = d.idx - 1
+
+		no_manual_depr_or_have_manual_depr_details_been_modified = (
+			manual_fb_idx == -1
+			or old_asset_doc.finance_books[manual_fb_idx].total_number_of_depreciations
+			!= self.finance_books[manual_fb_idx].total_number_of_depreciations
+			or old_asset_doc.finance_books[manual_fb_idx].frequency_of_depreciation
+			!= self.finance_books[manual_fb_idx].frequency_of_depreciation
+			or old_asset_doc.finance_books[manual_fb_idx].depreciation_start_date
+			!= getdate(self.finance_books[manual_fb_idx].depreciation_start_date)
+			or old_asset_doc.finance_books[manual_fb_idx].expected_value_after_useful_life
+			!= self.finance_books[manual_fb_idx].expected_value_after_useful_life
+		)
+
+		if no_manual_depr_or_have_manual_depr_details_been_modified:
+			return True
+
+		return False
 
 	def validate_item(self):
 		item = frappe.get_cached_value(
@@ -225,9 +266,7 @@ class Asset(AccountsController):
 			)
 
 	def make_depreciation_schedule(self, date_of_disposal):
-		if "Manual" not in [d.depreciation_method for d in self.finance_books] and not self.get(
-			"schedules"
-		):
+		if not self.get("schedules"):
 			self.schedules = []
 
 		if not self.available_for_use_date:
@@ -545,9 +584,7 @@ class Asset(AccountsController):
 	def set_accumulated_depreciation(
 		self, date_of_disposal=None, date_of_return=None, ignore_booked_entry=False
 	):
-		straight_line_idx = [
-			d.idx for d in self.get("schedules") if d.depreciation_method == "Straight Line"
-		]
+		straight_line_idx = []
 		finance_books = []
 
 		for i, d in enumerate(self.get("schedules")):
@@ -555,6 +592,12 @@ class Asset(AccountsController):
 				continue
 
 			if int(d.finance_book_id) not in finance_books:
+				straight_line_idx = [
+					s.idx
+					for s in self.get("schedules")
+					if s.finance_book_id == d.finance_book_id
+					and (s.depreciation_method == "Straight Line" or s.depreciation_method == "Manual")
+				]
 				accumulated_depreciation = flt(self.opening_accumulated_depreciation)
 				value_after_depreciation = flt(
 					self.get("finance_books")[cint(d.finance_book_id) - 1].value_after_depreciation
@@ -667,11 +710,15 @@ class Asset(AccountsController):
 
 			if self.journal_entry_for_scrap:
 				status = "Scrapped"
-			elif self.finance_books:
-				idx = self.get_default_finance_book_idx() or 0
+			else:
+				expected_value_after_useful_life = 0
+				value_after_depreciation = self.value_after_depreciation
 
-				expected_value_after_useful_life = self.finance_books[idx].expected_value_after_useful_life
-				value_after_depreciation = self.finance_books[idx].value_after_depreciation
+				if self.calculate_depreciation:
+					idx = self.get_default_finance_book_idx() or 0
+
+					expected_value_after_useful_life = self.finance_books[idx].expected_value_after_useful_life
+					value_after_depreciation = self.finance_books[idx].value_after_depreciation
 
 				if flt(value_after_depreciation) <= expected_value_after_useful_life:
 					status = "Fully Depreciated"
@@ -683,14 +730,16 @@ class Asset(AccountsController):
 
 	def get_value_after_depreciation(self, finance_book=None):
 		if not self.calculate_depreciation:
-			return self.value_after_depreciation
+			return flt(self.value_after_depreciation, self.precision("gross_purchase_amount"))
 
 		if not finance_book:
-			return self.get("finance_books")[0].value_after_depreciation
+			return flt(
+				self.get("finance_books")[0].value_after_depreciation, self.precision("gross_purchase_amount")
+			)
 
 		for row in self.get("finance_books"):
 			if finance_book == row.finance_book:
-				return row.value_after_depreciation
+				return flt(row.value_after_depreciation, self.precision("gross_purchase_amount"))
 
 	def get_default_finance_book_idx(self):
 		if not self.get("default_finance_book") and self.company:
@@ -700,24 +749,6 @@ class Asset(AccountsController):
 			for d in self.get("finance_books"):
 				if d.finance_book == self.default_finance_book:
 					return cint(d.idx) - 1
-
-	@frappe.whitelist()
-	def get_manual_depreciation_entries(self):
-		(_, _, depreciation_expense_account) = get_depreciation_accounts(self)
-
-		gle = frappe.qb.DocType("GL Entry")
-
-		records = (
-			frappe.qb.from_(gle)
-			.select(gle.voucher_no.as_("name"), gle.debit.as_("value"), gle.posting_date)
-			.where(gle.against_voucher == self.name)
-			.where(gle.account == depreciation_expense_account)
-			.where(gle.debit != 0)
-			.where(gle.is_cancelled == 0)
-			.orderby(gle.posting_date)
-		).run(as_dict=True)
-
-		return records
 
 	def validate_make_gl_entry(self):
 		purchase_document = self.get_purchase_document()
@@ -834,6 +865,25 @@ class Asset(AccountsController):
 
 			make_gl_entries(gl_entries)
 			self.db_set("booked_fixed_asset", 1)
+
+	@frappe.whitelist()
+	def get_manual_depreciation_entries(self):
+		(_, _, depreciation_expense_account) = get_depreciation_accounts(self)
+
+		gle = frappe.qb.DocType("GL Entry")
+
+		records = (
+			frappe.qb.from_(gle)
+			.select(gle.voucher_no.as_("name"), gle.debit.as_("value"), gle.posting_date)
+			.where(gle.against_voucher == self.name)
+			.where(gle.account == depreciation_expense_account)
+			.where(gle.debit != 0)
+			.where(gle.is_cancelled == 0)
+			.orderby(gle.posting_date)
+			.orderby(gle.creation)
+		).run(as_dict=True)
+
+		return records
 
 	@frappe.whitelist()
 	def get_depreciation_rate(self, args, on_validate=False):
