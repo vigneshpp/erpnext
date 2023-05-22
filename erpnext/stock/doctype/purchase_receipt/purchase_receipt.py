@@ -369,8 +369,20 @@ class PurchaseReceipt(BuyingController):
 					)
 
 					outgoing_amount = d.base_net_amount
-					if self.is_internal_supplier and d.valuation_rate:
-						outgoing_amount = d.valuation_rate * d.stock_qty
+					if self.is_internal_transfer() and d.valuation_rate:
+						outgoing_amount = abs(
+							frappe.db.get_value(
+								"Stock Ledger Entry",
+								{
+									"voucher_type": "Purchase Receipt",
+									"voucher_no": self.name,
+									"voucher_detail_no": d.name,
+									"warehouse": d.from_warehouse,
+									"is_cancelled": 0,
+								},
+								"stock_value_difference",
+							)
+						)
 						credit_amount = outgoing_amount
 
 					if credit_amount:
@@ -831,7 +843,7 @@ def update_billing_percentage(pr_doc, update_modified=True):
 	# Update Billing % based on pending accepted qty
 	total_amount, total_billed_amount = 0, 0
 	for item in pr_doc.items:
-		return_data = frappe.db.get_list(
+		return_data = frappe.get_all(
 			"Purchase Receipt",
 			fields=["sum(abs(`tabPurchase Receipt Item`.qty)) as qty"],
 			filters=[

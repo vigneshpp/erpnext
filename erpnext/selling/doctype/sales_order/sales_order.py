@@ -22,6 +22,9 @@ from erpnext.accounts.doctype.sales_invoice.sales_invoice import (
 )
 from erpnext.accounts.party import get_party_account
 from erpnext.controllers.selling_controller import SellingController
+from erpnext.manufacturing.doctype.blanket_order.blanket_order import (
+	validate_against_blanket_order,
+)
 from erpnext.manufacturing.doctype.production_plan.production_plan import (
 	get_items_for_material_requests,
 )
@@ -53,6 +56,7 @@ class SalesOrder(SellingController):
 		self.validate_warehouse()
 		self.validate_drop_ship()
 		self.validate_serial_no_based_delivery()
+		validate_against_blanket_order(self)
 		validate_inter_company_party(
 			self.doctype, self.customer, self.company, self.inter_company_order_reference
 		)
@@ -1385,8 +1389,9 @@ def get_work_order_items(sales_order, for_raw_material_request=0):
 						.select(Sum(wo.qty))
 						.where(
 							(wo.production_item == i.item_code)
-							& (wo.sales_order == so.name) * (wo.sales_order_item == i.name)
-							& (wo.docstatus.lte(2))
+							& (wo.sales_order == so.name)
+							& (wo.sales_order_item == i.name)
+							& (wo.docstatus.lt(2))
 						)
 						.run()[0][0]
 					)
