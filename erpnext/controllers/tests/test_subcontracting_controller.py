@@ -1074,8 +1074,8 @@ def make_bom_for_subcontracted_items():
 
 
 def set_backflush_based_on(based_on):
-	frappe.db.set_value(
-		"Buying Settings", None, "backflush_raw_materials_of_subcontract_based_on", based_on
+	frappe.db.set_single_value(
+		"Buying Settings", "backflush_raw_materials_of_subcontract_based_on", based_on
 	)
 
 
@@ -1090,7 +1090,7 @@ def get_subcontracting_order(**args):
 		po = frappe.get_doc("Purchase Order", args.get("po_name"))
 
 		if po.is_subcontracted:
-			return create_subcontracting_order(po_name=po.name, **args)
+			return create_subcontracting_order(**args)
 
 	if not args.service_items:
 		service_items = [

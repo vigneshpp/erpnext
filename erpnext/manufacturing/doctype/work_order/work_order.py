@@ -245,7 +245,9 @@ class WorkOrder(Document):
 				status = "Not Started"
 				if flt(self.material_transferred_for_manufacturing) > 0:
 					status = "In Process"
-				if flt(self.produced_qty) >= flt(self.qty):
+
+				total_qty = flt(self.produced_qty) + flt(self.process_loss_qty)
+				if flt(total_qty) >= flt(self.qty):
 					status = "Completed"
 		else:
 			status = "Cancelled"
@@ -517,8 +519,8 @@ class WorkOrder(Document):
 		)
 
 		if enable_capacity_planning and job_card_doc:
-			row.planned_start_time = job_card_doc.time_logs[-1].from_time
-			row.planned_end_time = job_card_doc.time_logs[-1].to_time
+			row.planned_start_time = job_card_doc.scheduled_time_logs[-1].from_time
+			row.planned_end_time = job_card_doc.scheduled_time_logs[-1].to_time
 
 			if date_diff(row.planned_start_time, original_start_time) > plan_days:
 				frappe.message_log.pop()
@@ -761,13 +763,15 @@ class WorkOrder(Document):
 		max_allowed_qty_for_wo = flt(self.qty) + (allowance_percentage / 100 * flt(self.qty))
 
 		for d in self.get("operations"):
-			if not d.completed_qty:
+			precision = d.precision("completed_qty")
+			qty = flt(d.completed_qty, precision) + flt(d.process_loss_qty, precision)
+			if not qty:
 				d.status = "Pending"
-			elif flt(d.completed_qty) < flt(self.qty):
+			elif flt(qty) < flt(self.qty):
 				d.status = "Work in Progress"
-			elif flt(d.completed_qty) == flt(self.qty):
+			elif flt(qty) == flt(self.qty):
 				d.status = "Completed"
-			elif flt(d.completed_qty) <= max_allowed_qty_for_wo:
+			elif flt(qty) <= max_allowed_qty_for_wo:
 				d.status = "Completed"
 			else:
 				frappe.throw(_("Completed Qty cannot be greater than 'Qty to Manufacture'"))
@@ -1022,7 +1026,7 @@ class WorkOrder(Document):
 			consumed_qty = frappe.db.sql(
 				"""
 				SELECT
-					SUM(qty)
+					SUM(detail.qty)
 				FROM
 					`tabStock Entry` entry,
 					`tabStock Entry Detail` detail
@@ -1078,7 +1082,7 @@ def get_bom_operations(doctype, txt, searchfield, start, page_len, filters):
 
 
 @frappe.whitelist()
-def get_item_details(item, project=None, skip_bom_info=False):
+def get_item_details(item, project=None, skip_bom_info=False, throw=True):
 	res = frappe.db.sql(
 		"""
 		select stock_uom, description, item_name, allow_alternative_item,
@@ -1114,12 +1118,15 @@ def get_item_details(item, project=None, skip_bom_info=False):
 
 	if not res["bom_no"]:
 		if project:
-			res = get_item_details(item)
+			res = get_item_details(item, throw=throw)
 			frappe.msgprint(
 				_("Default BOM not found for Item {0} and Project {1}").format(item, project), alert=1
 			)
 		else:
-			frappe.throw(_("Default BOM for {0} not found").format(item))
+			msg = _("Default BOM for {0} not found").format(item)
+			frappe.msgprint(msg, raise_exception=throw, indicator="yellow", alert=(not throw))
+
+			return res
 
 	bom_data = frappe.db.get_value(
 		"BOM",

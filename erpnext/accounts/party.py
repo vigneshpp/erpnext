@@ -2,6 +2,8 @@
 # License: GNU General Public License v3. See license.txt
 
 
+from typing import Optional
+
 import frappe
 from frappe import _, msgprint, scrub
 from frappe.contacts.doctype.address.address import (
@@ -12,6 +14,7 @@ from frappe.contacts.doctype.address.address import (
 from frappe.contacts.doctype.contact.contact import get_contact_details
 from frappe.core.doctype.user_permission.user_permission import get_permitted_documents
 from frappe.model.utils import get_fetch_values
+from frappe.query_builder.functions import Abs, Date, Sum
 from frappe.utils import (
 	add_days,
 	add_months,
@@ -31,6 +34,7 @@ import erpnext
 from erpnext import get_company_currency
 from erpnext.accounts.utils import get_fiscal_year
 from erpnext.exceptions import InvalidAccountCurrency, PartyDisabled, PartyFrozen
+from erpnext.utilities.regional import temporary_flag
 
 PURCHASE_TRANSACTION_TYPES = {"Purchase Order", "Purchase Receipt", "Purchase Invoice"}
 SALES_TRANSACTION_TYPES = {
@@ -259,9 +263,8 @@ def set_address_details(
 	)
 
 	if doctype in TRANSACTION_TYPES:
-		# required to set correct region
-		frappe.flags.company = company
-		get_regional_address_details(party_details, doctype, company)
+		with temporary_flag("company", company):
+			get_regional_address_details(party_details, doctype, company)
 
 	return party_address, shipping_address
 
@@ -365,7 +368,7 @@ def set_account_and_due_date(
 
 
 @frappe.whitelist()
-def get_party_account(party_type, party=None, company=None):
+def get_party_account(party_type, party=None, company=None, include_advance=False):
 	"""Returns the account for the given `party`.
 	Will first search in party (Customer / Supplier) record, if not found,
 	will search in group (Customer Group / Supplier Group),
@@ -405,6 +408,40 @@ def get_party_account(party_type, party=None, company=None):
 			account_currency = frappe.get_cached_value("Account", account, "account_currency")
 		if (account and account_currency != existing_gle_currency) or not account:
 			account = get_party_gle_account(party_type, party, company)
+
+	if include_advance and party_type in ["Customer", "Supplier"]:
+		advance_account = get_party_advance_account(party_type, party, company)
+		if advance_account:
+			return [account, advance_account]
+		else:
+			return [account]
+
+	return account
+
+
+def get_party_advance_account(party_type, party, company):
+	account = frappe.db.get_value(
+		"Party Account",
+		{"parenttype": party_type, "parent": party, "company": company},
+		"advance_account",
+	)
+
+	if not account:
+		party_group_doctype = "Customer Group" if party_type == "Customer" else "Supplier Group"
+		group = frappe.get_cached_value(party_type, party, scrub(party_group_doctype))
+		account = frappe.db.get_value(
+			"Party Account",
+			{"parenttype": party_group_doctype, "parent": group, "company": company},
+			"advance_account",
+		)
+
+	if not account:
+		account_name = (
+			"default_advance_received_account"
+			if party_type == "Customer"
+			else "default_advance_paid_account"
+		)
+		account = frappe.get_cached_value("Company", company, account_name)
 
 	return account
 
@@ -515,7 +552,10 @@ def validate_party_accounts(doc):
 				)
 
 		# validate if account is mapped for same company
-		validate_account_head(account.idx, account.account, account.company)
+		if account.account:
+			validate_account_head(account.idx, account.account, account.company)
+		if account.advance_account:
+			validate_account_head(account.idx, account.advance_account, account.company)
 
 
 @frappe.whitelist()
@@ -647,12 +687,12 @@ def set_taxes(
 	else:
 		args.update(get_party_details(party, party_type))
 
-	if party_type in ("Customer", "Lead"):
+	if party_type in ("Customer", "Lead", "Prospect"):
 		args.update({"tax_type": "Sales"})
 
-		if party_type == "Lead":
+		if party_type in ["Lead", "Prospect"]:
 			args["customer"] = None
-			del args["lead"]
+			del args[frappe.scrub(party_type)]
 	else:
 		args.update({"tax_type": "Purchase"})
 
@@ -667,6 +707,7 @@ def get_payment_terms_template(party_name, party_type, company=None):
 	if party_type not in ("Customer", "Supplier"):
 		return
 	template = None
+
 	if party_type == "Customer":
 		customer = frappe.get_cached_value(
 			"Customer", party_name, fieldname=["payment_terms", "customer_group"], as_dict=1
@@ -850,7 +891,7 @@ def get_dashboard_info(party_type, party, loyalty_program=None):
 	return company_wise_info
 
 
-def get_party_shipping_address(doctype, name):
+def get_party_shipping_address(doctype: str, name: str) -> Optional[str]:
 	"""
 	Returns an Address name (best guess) for the given doctype and name for which `address_type == 'Shipping'` is true.
 	and/or `is_shipping_address = 1`.
@@ -861,80 +902,84 @@ def get_party_shipping_address(doctype, name):
 	:param name: Party name
 	:return: String
 	"""
-	out = frappe.db.sql(
-		"SELECT dl.parent "
-		"from `tabDynamic Link` dl join `tabAddress` ta on dl.parent=ta.name "
-		"where "
-		"dl.link_doctype=%s "
-		"and dl.link_name=%s "
-		"and dl.parenttype='Address' "
-		"and ifnull(ta.disabled, 0) = 0 and"
-		"(ta.address_type='Shipping' or ta.is_shipping_address=1) "
-		"order by ta.is_shipping_address desc, ta.address_type desc limit 1",
-		(doctype, name),
+	shipping_addresses = frappe.get_all(
+		"Address",
+		filters=[
+			["Dynamic Link", "link_doctype", "=", doctype],
+			["Dynamic Link", "link_name", "=", name],
+			["disabled", "=", 0],
+		],
+		or_filters=[
+			["is_shipping_address", "=", 1],
+			["address_type", "=", "Shipping"],
+		],
+		pluck="name",
+		limit=1,
+		order_by="is_shipping_address DESC",
 	)
-	if out:
-		return out[0][0]
-	else:
-		return ""
+
+	return shipping_addresses[0] if shipping_addresses else None
 
 
 def get_partywise_advanced_payment_amount(
 	party_type, posting_date=None, future_payment=0, company=None, party=None
 ):
-	cond = "1=1"
+	ple = frappe.qb.DocType("Payment Ledger Entry")
+	query = (
+		frappe.qb.from_(ple)
+		.select(ple.party, Abs(Sum(ple.amount).as_("amount")))
+		.where(
+			(ple.party_type.isin(party_type))
+			& (ple.amount < 0)
+			& (ple.against_voucher_no == ple.voucher_no)
+			& (ple.delinked == 0)
+		)
+		.groupby(ple.party)
+	)
+
 	if posting_date:
 		if future_payment:
-			cond = "(posting_date <= '{0}' OR DATE(creation) <= '{0}')" "".format(posting_date)
+			query = query.where((ple.posting_date <= posting_date) | (Date(ple.creation) <= posting_date))
 		else:
-			cond = "posting_date <= '{0}'".format(posting_date)
+			query = query.where(ple.posting_date <= posting_date)
 
 	if company:
-		cond += "and company = {0}".format(frappe.db.escape(company))
+		query = query.where(ple.company == company)
 
 	if party:
-		cond += "and party = {0}".format(frappe.db.escape(party))
+		query = query.where(ple.party == party)
 
-	data = frappe.db.sql(
-		""" SELECT party, sum({0}) as amount
-		FROM `tabGL Entry`
-		WHERE
-			party_type = %s and against_voucher is null
-			and is_cancelled = 0
-			and {1} GROUP BY party""".format(
-			("credit") if party_type == "Customer" else "debit", cond
-		),
-		party_type,
-	)
+	data = query.run()
 	if data:
 		return frappe._dict(data)
 
 
-def get_default_contact(doctype, name):
+def get_default_contact(doctype: str, name: str) -> Optional[str]:
 	"""
-	Returns default contact for the given doctype and name.
-	Can be ordered by `contact_type` to either is_primary_contact or is_billing_contact.
+	Returns contact name only if there is a primary contact for given doctype and name.
+
+	Else returns None
+
+	:param doctype: Party Doctype
+	:param name: Party name
+	:return: String
 	"""
-	out = frappe.db.sql(
-		"""
-			SELECT dl.parent, c.is_primary_contact, c.is_billing_contact
-			FROM `tabDynamic Link` dl
-			INNER JOIN `tabContact` c ON c.name = dl.parent
-			WHERE
-				dl.link_doctype=%s AND
-				dl.link_name=%s AND
-				dl.parenttype = 'Contact'
-			ORDER BY is_primary_contact DESC, is_billing_contact DESC
-		""",
-		(doctype, name),
+	contacts = frappe.get_all(
+		"Contact",
+		filters=[
+			["Dynamic Link", "link_doctype", "=", doctype],
+			["Dynamic Link", "link_name", "=", name],
+		],
+		or_filters=[
+			["is_primary_contact", "=", 1],
+			["is_billing_contact", "=", 1],
+		],
+		pluck="name",
+		limit=1,
+		order_by="is_primary_contact DESC, is_billing_contact DESC",
 	)
-	if out:
-		try:
-			return out[0][0]
-		except Exception:
-			return None
-	else:
-		return None
+
+	return contacts[0] if contacts else None
 
 
 def add_party_account(party_type, party, company, account):

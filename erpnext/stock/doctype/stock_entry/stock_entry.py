@@ -187,7 +187,7 @@ class StockEntry(StockController):
 			return False
 
 		# If line items are more than 100 or record is older than 6 months
-		if len(self.items) > 100 or month_diff(nowdate(), self.posting_date) > 6:
+		if len(self.items) > 50 or month_diff(nowdate(), self.posting_date) > 6:
 			return True
 
 		return False
@@ -266,10 +266,10 @@ class StockEntry(StockController):
 			return
 
 		for row in self.items:
-			if row.job_card_item:
+			if row.job_card_item or not row.s_warehouse:
 				continue
 
-			msg = f"""Row #{0}: The job card item reference
+			msg = f"""Row #{row.idx}: The job card item reference
 				is missing. Kindly create the stock entry
 				from the job card. If you have added the row manually
 				then you won't be able to add job card item reference."""
@@ -420,7 +420,7 @@ class StockEntry(StockController):
 						transferred_materials = frappe.db.sql(
 							"""
 									select
-										sum(qty) as qty
+										sum(sed.qty) as qty
 									from `tabStock Entry` se,`tabStock Entry Detail` sed
 									where
 										se.name = sed.parent and se.docstatus=1 and
@@ -442,13 +442,16 @@ class StockEntry(StockController):
 		if self.purpose == "Manufacture" and self.work_order:
 			for d in self.items:
 				if d.is_finished_item:
+					if self.process_loss_qty:
+						d.qty = self.fg_completed_qty - self.process_loss_qty
+
 					item_wise_qty.setdefault(d.item_code, []).append(d.qty)
 
 		precision = frappe.get_precision("Stock Entry Detail", "qty")
 		for item_code, qty_list in item_wise_qty.items():
 			total = flt(sum(qty_list), precision)
 
-			if (self.fg_completed_qty - total) > 0:
+			if (self.fg_completed_qty - total) > 0 and not self.process_loss_qty:
 				self.process_loss_qty = flt(self.fg_completed_qty - total, precision)
 				self.process_loss_percentage = flt(self.process_loss_qty * 100 / self.fg_completed_qty)
 
@@ -578,7 +581,9 @@ class StockEntry(StockController):
 
 		for d in prod_order.get("operations"):
 			total_completed_qty = flt(self.fg_completed_qty) + flt(prod_order.produced_qty)
-			completed_qty = d.completed_qty + (allowance_percentage / 100 * d.completed_qty)
+			completed_qty = (
+				d.completed_qty + d.process_loss_qty + (allowance_percentage / 100 * d.completed_qty)
+			)
 			if total_completed_qty > flt(completed_qty):
 				job_card = frappe.db.get_value("Job Card", {"operation_id": d.name}, "name")
 				if not job_card:
@@ -1640,15 +1645,35 @@ class StockEntry(StockController):
 		if self.purpose not in ("Manufacture", "Repack"):
 			return
 
-		self.process_loss_qty = 0.0
-		if not self.process_loss_percentage:
+		precision = self.precision("process_loss_qty")
+		if self.work_order:
+			data = frappe.get_all(
+				"Work Order Operation",
+				filters={"parent": self.work_order},
+				fields=["max(process_loss_qty) as process_loss_qty"],
+			)
+
+			if data and data[0].process_loss_qty is not None:
+				process_loss_qty = data[0].process_loss_qty
+				if flt(self.process_loss_qty, precision) != flt(process_loss_qty, precision):
+					self.process_loss_qty = flt(process_loss_qty, precision)
+
+					frappe.msgprint(
+						_("The Process Loss Qty has reset as per job cards Process Loss Qty"), alert=True
+					)
+
+		if not self.process_loss_percentage and not self.process_loss_qty:
 			self.process_loss_percentage = frappe.get_cached_value(
 				"BOM", self.bom_no, "process_loss_percentage"
 			)
 
-		if self.process_loss_percentage:
+		if self.process_loss_percentage and not self.process_loss_qty:
 			self.process_loss_qty = flt(
 				(flt(self.fg_completed_qty) * flt(self.process_loss_percentage)) / 100
+			)
+		elif self.process_loss_qty and not self.process_loss_percentage:
+			self.process_loss_percentage = flt(
+				(flt(self.process_loss_qty) / flt(self.fg_completed_qty)) * 100
 			)
 
 	def set_work_order_details(self):
@@ -2351,7 +2376,11 @@ class StockEntry(StockController):
 			return
 
 		for d in self.items:
-			if d.is_finished_item and d.item_code == self.pro_doc.production_item:
+			if (
+				d.is_finished_item
+				and d.item_code == self.pro_doc.production_item
+				and not d.serial_and_batch_bundle
+			):
 				serial_nos = self.get_available_serial_nos()
 				if serial_nos:
 					row = frappe._dict({"serial_nos": serial_nos[0 : cint(d.qty)]})

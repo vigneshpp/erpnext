@@ -43,7 +43,7 @@ from erpnext.stock.stock_ledger import get_previous_sle
 
 class TestDeliveryNote(FrappeTestCase):
 	def test_over_billing_against_dn(self):
-		frappe.db.set_value("Stock Settings", None, "allow_negative_stock", 1)
+		frappe.db.set_single_value("Stock Settings", "allow_negative_stock", 1)
 
 		dn = create_delivery_note(do_not_submit=True)
 		self.assertRaises(frappe.ValidationError, make_sales_invoice, dn.name)
@@ -317,6 +317,37 @@ class TestDeliveryNote(FrappeTestCase):
 		self.assertEqual(dn.items[0].returned_qty, 5)
 		self.assertEqual(dn.per_returned, 100)
 		self.assertEqual(dn.status, "Return Issued")
+
+	def test_delivery_note_return_valuation_on_different_warehuose(self):
+		from erpnext.stock.doctype.warehouse.test_warehouse import create_warehouse
+
+		company = frappe.db.get_value("Warehouse", "Stores - TCP1", "company")
+		item_code = "Test Return Valuation For DN"
+		make_item("Test Return Valuation For DN", {"is_stock_item": 1})
+		return_warehouse = create_warehouse("Returned Test Warehouse", company=company)
+
+		make_stock_entry(item_code=item_code, target="Stores - TCP1", qty=5, basic_rate=150)
+
+		dn = create_delivery_note(
+			item_code=item_code,
+			qty=5,
+			rate=500,
+			warehouse="Stores - TCP1",
+			company=company,
+			expense_account="Cost of Goods Sold - TCP1",
+			cost_center="Main - TCP1",
+		)
+
+		dn.submit()
+		self.assertEqual(dn.items[0].incoming_rate, 150)
+
+		from erpnext.controllers.sales_and_purchase_return import make_return_doc
+
+		return_dn = make_return_doc(dn.doctype, dn.name)
+		return_dn.items[0].warehouse = return_warehouse
+		return_dn.save().submit()
+
+		self.assertEqual(return_dn.items[0].incoming_rate, 150)
 
 	def test_return_single_item_from_bundled_items(self):
 		company = frappe.db.get_value("Warehouse", "Stores - TCP1", "company")
@@ -672,7 +703,7 @@ class TestDeliveryNote(FrappeTestCase):
 
 	def test_dn_billing_status_case1(self):
 		# SO -> DN -> SI
-		so = make_sales_order()
+		so = make_sales_order(po_no="12345")
 		dn = create_dn_against_so(so.name, delivered_qty=2)
 
 		self.assertEqual(dn.status, "To Bill")
@@ -699,7 +730,7 @@ class TestDeliveryNote(FrappeTestCase):
 			make_sales_invoice,
 		)
 
-		so = make_sales_order()
+		so = make_sales_order(po_no="12345")
 
 		si = make_sales_invoice(so.name)
 		si.get("items")[0].qty = 5
@@ -709,7 +740,7 @@ class TestDeliveryNote(FrappeTestCase):
 		# Testing if Customer's Purchase Order No was rightly copied
 		self.assertEqual(so.po_no, si.po_no)
 
-		frappe.db.set_value("Stock Settings", None, "allow_negative_stock", 1)
+		frappe.db.set_single_value("Stock Settings", "allow_negative_stock", 1)
 
 		dn1 = make_delivery_note(so.name)
 		dn1.get("items")[0].qty = 2
@@ -741,9 +772,9 @@ class TestDeliveryNote(FrappeTestCase):
 			make_sales_invoice as make_sales_invoice_from_so,
 		)
 
-		frappe.db.set_value("Stock Settings", None, "allow_negative_stock", 1)
+		frappe.db.set_single_value("Stock Settings", "allow_negative_stock", 1)
 
-		so = make_sales_order()
+		so = make_sales_order(po_no="12345")
 
 		dn1 = make_delivery_note(so.name)
 		dn1.get("items")[0].qty = 2
@@ -789,7 +820,7 @@ class TestDeliveryNote(FrappeTestCase):
 		from erpnext.accounts.doctype.sales_invoice.sales_invoice import make_delivery_note
 		from erpnext.selling.doctype.sales_order.sales_order import make_sales_invoice
 
-		so = make_sales_order()
+		so = make_sales_order(po_no="12345")
 
 		si = make_sales_invoice(so.name)
 		si.submit()
@@ -1196,6 +1227,7 @@ class TestDeliveryNote(FrappeTestCase):
 		self.assertEqual(get_reserved_qty(item, warehouse), 0 if dont_reserve_qty else qty_to_reserve)
 
 	def tearDown(self):
+		frappe.db.rollback()
 		frappe.db.set_single_value("Selling Settings", "dont_reserve_sales_order_qty_on_sales_return", 0)
 
 

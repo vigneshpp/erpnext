@@ -161,7 +161,6 @@ def add_account_subtype(account_subtype):
 		frappe.throw(frappe.get_traceback())
 
 
-@frappe.whitelist()
 def sync_transactions(bank, bank_account):
 	"""Sync transactions based on the last integration date as the start date, after sync is completed
 	add the transaction date of the oldest transaction as the last integration date."""
@@ -238,14 +237,15 @@ def new_bank_transaction(transaction):
 		deposit = abs(amount)
 		withdrawal = 0.0
 
-	status = "Pending" if transaction["pending"] == "True" else "Settled"
+	status = "Pending" if transaction["pending"] == True else "Settled"
 
 	tags = []
-	try:
-		tags += transaction["category"]
-		tags += [f'Plaid Cat. {transaction["category_id"]}']
-	except KeyError:
-		pass
+	if transaction["category"]:
+		try:
+			tags += transaction["category"]
+			tags += [f'Plaid Cat. {transaction["category_id"]}']
+		except KeyError:
+			pass
 
 	if not frappe.db.exists("Bank Transaction", dict(transaction_id=transaction["transaction_id"])):
 		try:

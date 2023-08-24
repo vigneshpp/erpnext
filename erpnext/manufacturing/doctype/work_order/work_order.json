@@ -46,8 +46,8 @@
   "required_items_section",
   "materials_and_operations_tab",
   "operations_section",
-  "operations",
   "transfer_material_against",
+  "operations",
   "time",
   "planned_start_date",
   "planned_end_date",
@@ -330,7 +330,6 @@
    "label": "Expected Delivery Date"
   },
   {
-   "collapsible": 1,
    "fieldname": "operations_section",
    "fieldtype": "Section Break",
    "label": "Operations",
@@ -405,6 +404,8 @@
    "read_only": 1
   },
   {
+   "fetch_from": "production_item.stock_uom",
+   "fetch_if_empty": 1,
    "fieldname": "stock_uom",
    "fieldtype": "Link",
    "label": "Stock UOM",
@@ -591,7 +592,7 @@
  "image_field": "image",
  "is_submittable": 1,
  "links": [],
- "modified": "2023-04-06 12:35:12.149827",
+ "modified": "2023-08-11 18:35:49.852069",
  "modified_by": "Administrator",
  "module": "Manufacturing",
  "name": "Work Order",
@@ -611,7 +612,6 @@
    "read": 1,
    "report": 1,
    "role": "Manufacturing User",
-   "set_user_permissions": 1,
    "share": 1,
    "submit": 1,
    "write": 1

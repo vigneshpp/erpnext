@@ -130,9 +130,19 @@ erpnext.TransactionController = class TransactionController extends erpnext.taxe
 						'item_code': item_row.item_code,
 						'voucher_type': doc.doctype,
 						'voucher_no': ["in", [doc.name, ""]],
+						'is_cancelled': 0,
 					}
 				}
 			});
+
+			let sbb_field = this.frm.get_docfield('items', 'serial_and_batch_bundle');
+			if (sbb_field) {
+				sbb_field.get_route_options_for_new_doc = (row) => {
+					return {
+						'item_code': row.doc.item_code,
+					}
+				};
+			}
 		}
 
 		if(
@@ -183,7 +193,9 @@ erpnext.TransactionController = class TransactionController extends erpnext.taxe
 			this.frm.set_query("expense_account", "items", function(doc) {
 				return {
 					filters: {
-						"company": doc.company
+						"company": doc.company,
+						"report_type": "Profit and Loss",
+						"is_group": 0
 					}
 				};
 			});
@@ -265,7 +277,7 @@ erpnext.TransactionController = class TransactionController extends erpnext.taxe
 	}
 
 	setup_quality_inspection() {
-		if(!in_list(["Delivery Note", "Sales Invoice", "Purchase Receipt", "Purchase Invoice"], this.frm.doc.doctype)) {
+		if(!in_list(["Delivery Note", "Sales Invoice", "Purchase Receipt", "Purchase Invoice", "Subcontracting Receipt"], this.frm.doc.doctype)) {
 			return;
 		}
 
@@ -277,7 +289,7 @@ erpnext.TransactionController = class TransactionController extends erpnext.taxe
 			this.frm.page.set_inner_btn_group_as_primary(__('Create'));
 		}
 
-		const inspection_type = in_list(["Purchase Receipt", "Purchase Invoice"], this.frm.doc.doctype)
+		const inspection_type = in_list(["Purchase Receipt", "Purchase Invoice", "Subcontracting Receipt"], this.frm.doc.doctype)
 			? "Incoming" : "Outgoing";
 
 		let quality_inspection_field = this.frm.get_docfield("items", "quality_inspection");
@@ -346,12 +358,14 @@ erpnext.TransactionController = class TransactionController extends erpnext.taxe
 	}
 
 	refresh() {
+
 		erpnext.toggle_naming_series();
 		erpnext.hide_company();
 		this.set_dynamic_labels();
 		this.setup_sms();
 		this.setup_quality_inspection();
 		this.validate_has_items();
+		erpnext.utils.view_serial_batch_nos(this.frm);
 	}
 
 	scan_barcode() {
@@ -975,6 +989,16 @@ erpnext.TransactionController = class TransactionController extends erpnext.taxe
 		}
 		// Make read only if Accounts Settings doesn't allow stale rates
 		this.frm.set_df_property("conversion_rate", "read_only", erpnext.stale_rate_allowed() ? 0 : 1);
+	}
+
+	apply_discount_on_item(doc, cdt, cdn, field) {
+		var item = frappe.get_doc(cdt, cdn);
+		if(!item.price_list_rate) {
+			item[field] = 0.0;
+		} else {
+			this.price_list_rate(doc, cdt, cdn);
+		}
+		this.set_gross_profit(item);
 	}
 
 	shipping_rule() {
@@ -1647,6 +1671,9 @@ erpnext.TransactionController = class TransactionController extends erpnext.taxe
 						() => {
 							if(args.items.length) {
 								me._set_values_for_item_list(r.message.children);
+								$.each(r.message.children || [], function(i, d) {
+									me.apply_discount_on_item(d, d.doctype, d.name, 'discount_percentage');
+								});
 							}
 						},
 						() => { me.in_apply_price_list = false; }
@@ -2040,6 +2067,7 @@ erpnext.TransactionController = class TransactionController extends erpnext.taxe
 		const me = this;
 		const dialog = new frappe.ui.Dialog({
 			title: __("Select Items for Quality Inspection"),
+			size: "extra-large",
 			fields: fields,
 			primary_action: function () {
 				const data = dialog.get_values();
@@ -2339,13 +2367,10 @@ erpnext.show_serial_batch_selector = function (frm, item_row, callback, on_close
 
 	frappe.require("assets/erpnext/js/utils/serial_no_batch_selector.js", function() {
 		if (in_list(["Sales Invoice", "Delivery Note"], frm.doc.doctype)) {
-			item_row.outward = frm.doc.is_return ? 0 : 1;
+			item_row.type_of_transaction = frm.doc.is_return ? "Inward" : "Outward";
 		} else {
-			item_row.outward = frm.doc.is_return ? 1 : 0;
+			item_row.type_of_transaction = frm.doc.is_return ? "Outward" : "Inward";
 		}
-
-		item_row.type_of_transaction = (item_row.outward === 1
-			? "Outward":"Inward");
 
 		new erpnext.SerialBatchPackageSelector(frm, item_row, (r) => {
 			if (r) {

@@ -115,11 +115,11 @@ class MaterialRequest(BuyingController):
 		"""Set title as comma separated list of items"""
 		if not self.title:
 			items = ", ".join([d.item_name for d in self.items][:3])
-			self.title = _("{0} Request for {1}").format(self.material_request_type, items)[:100]
+			self.title = _("{0} Request for {1}").format(_(self.material_request_type), items)[:100]
 
 	def on_submit(self):
-		self.update_requested_qty()
 		self.update_requested_qty_in_production_plan()
+		self.update_requested_qty()
 		if self.material_request_type == "Purchase":
 			self.validate_budget()
 
@@ -178,8 +178,8 @@ class MaterialRequest(BuyingController):
 				)
 
 	def on_cancel(self):
-		self.update_requested_qty()
 		self.update_requested_qty_in_production_plan()
+		self.update_requested_qty()
 
 	def get_mr_items_ordered_qty(self, mr_items):
 		mr_items_ordered_qty = {}
@@ -225,7 +225,8 @@ class MaterialRequest(BuyingController):
 					d.ordered_qty = flt(mr_items_ordered_qty.get(d.name))
 
 					if mr_qty_allowance:
-						allowed_qty = d.qty + (d.qty * (mr_qty_allowance / 100))
+						allowed_qty = flt((d.qty + (d.qty * (mr_qty_allowance / 100))), d.precision("ordered_qty"))
+
 						if d.ordered_qty and d.ordered_qty > allowed_qty:
 							frappe.throw(
 								_(
@@ -270,7 +271,13 @@ class MaterialRequest(BuyingController):
 				item_wh_list.append([d.item_code, d.warehouse])
 
 		for item_code, warehouse in item_wh_list:
-			update_bin_qty(item_code, warehouse, {"indented_qty": get_indented_qty(item_code, warehouse)})
+			update_bin_qty(
+				item_code,
+				warehouse,
+				{
+					"indented_qty": get_indented_qty(item_code, warehouse),
+				},
+			)
 
 	def update_requested_qty_in_production_plan(self):
 		production_plans = []
@@ -649,7 +656,10 @@ def make_stock_entry(source_name, target_doc=None):
 					"job_card_item": "job_card_item",
 				},
 				"postprocess": update_item,
-				"condition": lambda doc: doc.ordered_qty < doc.stock_qty,
+				"condition": lambda doc: (
+					flt(doc.ordered_qty, doc.precision("ordered_qty"))
+					< flt(doc.stock_qty, doc.precision("ordered_qty"))
+				),
 			},
 		},
 		target_doc,
