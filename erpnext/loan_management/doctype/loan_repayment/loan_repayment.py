@@ -102,7 +102,7 @@ class LoanRepayment(AccountsController):
 		if flt(self.total_interest_paid, precision) > flt(self.interest_payable, precision):
 			if not self.is_term_loan:
 				# get last loan interest accrual date
-				last_accrual_date = get_last_accrual_date(self.against_loan)
+				last_accrual_date = get_last_accrual_date(self.against_loan, self.posting_date)
 
 				# get posting date upto which interest has to be accrued
 				per_day_interest = get_per_day_interest(
@@ -250,6 +250,9 @@ class LoanRepayment(AccountsController):
 		)
 
 	def check_future_accruals(self):
+		if self.is_term_loan:
+			return
+
 		future_accrual_date = frappe.db.get_value(
 			"Loan Interest Accrual",
 			{"posting_date": (">", self.posting_date), "docstatus": 1, "loan": self.against_loan},
@@ -724,7 +727,7 @@ def get_amounts(amounts, against_loan, posting_date):
 	if due_date:
 		pending_days = date_diff(posting_date, due_date) + 1
 	else:
-		last_accrual_date = get_last_accrual_date(against_loan_doc.name)
+		last_accrual_date = get_last_accrual_date(against_loan_doc.name, posting_date)
 		pending_days = date_diff(posting_date, last_accrual_date) + 1
 
 	if pending_days > 0:

@@ -27,6 +27,7 @@ from erpnext.accounts.general_ledger import make_reverse_gl_entries
 from erpnext.assets.doctype.asset.depreciation import (
 	get_depreciation_accounts,
 	get_disposal_account_and_cost_center,
+	is_first_day_of_the_month,
 	is_last_day_of_the_month,
 )
 from erpnext.assets.doctype.asset_category.asset_category import get_asset_category_account
@@ -147,17 +148,33 @@ class Asset(AccountsController):
 			frappe.throw(_("Item {0} must be a non-stock item").format(self.item_code))
 
 	def validate_cost_center(self):
-		if not self.cost_center:
-			return
-
-		cost_center_company = frappe.db.get_value("Cost Center", self.cost_center, "company")
-		if cost_center_company != self.company:
-			frappe.throw(
-				_("Selected Cost Center {} doesn't belongs to {}").format(
-					frappe.bold(self.cost_center), frappe.bold(self.company)
-				),
-				title=_("Invalid Cost Center"),
+		if self.cost_center:
+			cost_center_company, cost_center_is_group = frappe.db.get_value(
+				"Cost Center", self.cost_center, ["company", "is_group"]
 			)
+			if cost_center_company != self.company:
+				frappe.throw(
+					_("Cost Center {} doesn't belong to Company {}").format(
+						frappe.bold(self.cost_center), frappe.bold(self.company)
+					),
+					title=_("Invalid Cost Center"),
+				)
+			if cost_center_is_group:
+				frappe.throw(
+					_(
+						"Cost Center {} is a group cost center and group cost centers cannot be used in transactions"
+					).format(frappe.bold(self.cost_center)),
+					title=_("Invalid Cost Center"),
+				)
+
+		else:
+			if not frappe.get_cached_value("Company", self.company, "depreciation_cost_center"):
+				frappe.throw(
+					_(
+						"Please set a Cost Center for the Asset or set an Asset Depreciation Cost Center for the Company {}"
+					).format(frappe.bold(self.company)),
+					title=_("Missing Cost Center"),
+				)
 
 	def validate_in_use_date(self):
 		if not self.available_for_use_date:
@@ -364,8 +381,14 @@ class Asset(AccountsController):
 					break
 
 				# For first row
-				if n == 0 and has_pro_rata and not self.opening_accumulated_depreciation:
-					from_date = add_days(self.available_for_use_date, -1)
+				if (
+					n == 0
+					and (has_pro_rata or has_wdv_or_dd_non_yearly_pro_rata)
+					and not self.opening_accumulated_depreciation
+				):
+					from_date = add_days(
+						self.available_for_use_date, -1
+					)  # needed to calc depr amount for available_for_use_date too
 					depreciation_amount, days, months = self.get_pro_rata_amt(
 						finance_book,
 						depreciation_amount,
@@ -374,10 +397,18 @@ class Asset(AccountsController):
 						has_wdv_or_dd_non_yearly_pro_rata,
 					)
 				elif n == 0 and has_wdv_or_dd_non_yearly_pro_rata and self.opening_accumulated_depreciation:
-					from_date = add_months(
-						getdate(self.available_for_use_date),
-						(self.number_of_depreciations_booked * finance_book.frequency_of_depreciation),
-					)
+					if not is_first_day_of_the_month(getdate(self.available_for_use_date)):
+						from_date = get_last_day(
+							add_months(
+								getdate(self.available_for_use_date),
+								((self.number_of_depreciations_booked - 1) * finance_book.frequency_of_depreciation),
+							)
+						)
+					else:
+						from_date = add_months(
+							getdate(add_days(self.available_for_use_date, -1)),
+							(self.number_of_depreciations_booked * finance_book.frequency_of_depreciation),
+						)
 					depreciation_amount, days, months = self.get_pro_rata_amt(
 						finance_book,
 						depreciation_amount,
