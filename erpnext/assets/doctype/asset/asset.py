@@ -46,6 +46,7 @@ class Asset(AccountsController):
 		self.validate_item()
 		self.validate_cost_center()
 		self.set_missing_values()
+		self.validate_finance_books()
 		if not self.split_from:
 			self.prepare_depreciation_data()
 			update_draft_asset_depr_schedules(self)
@@ -197,8 +198,31 @@ class Asset(AccountsController):
 			self.asset_category = frappe.get_cached_value("Item", self.item_code, "asset_category")
 
 		if self.item_code and not self.get("finance_books"):
-			finance_books = get_item_details(self.item_code, self.asset_category)
+			finance_books = get_item_details(
+				self.item_code, self.asset_category, self.gross_purchase_amount
+			)
 			self.set("finance_books", finance_books)
+
+	def validate_finance_books(self):
+		if not self.calculate_depreciation or len(self.finance_books) == 1:
+			return
+
+		finance_books = set()
+
+		for d in self.finance_books:
+			if d.finance_book in finance_books:
+				frappe.throw(
+					_("Row #{}: Please use a different Finance Book.").format(d.idx),
+					title=_("Duplicate Finance Book"),
+				)
+			else:
+				finance_books.add(d.finance_book)
+
+			if not d.finance_book:
+				frappe.throw(
+					_("Row #{}: Finance Book should not be empty since you're using multiple.").format(d.idx),
+					title=_("Missing Finance Book"),
+				)
 
 	def validate_asset_values(self):
 		if not self.asset_category:
@@ -775,7 +799,7 @@ def transfer_asset(args):
 
 
 @frappe.whitelist()
-def get_item_details(item_code, asset_category):
+def get_item_details(item_code, asset_category, gross_purchase_amount):
 	asset_category_doc = frappe.get_doc("Asset Category", asset_category)
 	books = []
 	for d in asset_category_doc.finance_books:
@@ -785,7 +809,11 @@ def get_item_details(item_code, asset_category):
 				"depreciation_method": d.depreciation_method,
 				"total_number_of_depreciations": d.total_number_of_depreciations,
 				"frequency_of_depreciation": d.frequency_of_depreciation,
-				"start_date": nowdate(),
+				"daily_depreciation": d.daily_depreciation,
+				"salvage_value_percentage": d.salvage_value_percentage,
+				"expected_value_after_useful_life": flt(gross_purchase_amount)
+				* flt(d.salvage_value_percentage / 100),
+				"depreciation_start_date": d.depreciation_start_date or nowdate(),
 			}
 		)
 
@@ -840,7 +868,7 @@ def make_journal_entry(asset_name):
 	je.voucher_type = "Depreciation Entry"
 	je.naming_series = depreciation_series
 	je.company = asset.company
-	je.remark = _("Depreciation Entry against asset {0}").format(asset_name)
+	je.remark = ("Depreciation Entry against asset {0}").format(asset_name)
 
 	je.append(
 		"accounts",
