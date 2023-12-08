@@ -23,6 +23,60 @@ from erpnext.accounts.report.general_ledger.general_ledger import execute as get
 
 
 class ProcessStatementOfAccounts(Document):
+	# begin: auto-generated types
+	# This code is auto-generated. Do not modify anything in this block.
+
+	from typing import TYPE_CHECKING
+
+	if TYPE_CHECKING:
+		from frappe.types import DF
+
+		from erpnext.accounts.doctype.process_statement_of_accounts_customer.process_statement_of_accounts_customer import (
+			ProcessStatementOfAccountsCustomer,
+		)
+		from erpnext.accounts.doctype.psoa_cost_center.psoa_cost_center import PSOACostCenter
+		from erpnext.accounts.doctype.psoa_project.psoa_project import PSOAProject
+
+		account: DF.Link | None
+		ageing_based_on: DF.Literal["Due Date", "Posting Date"]
+		based_on_payment_terms: DF.Check
+		body: DF.TextEditor | None
+		cc_to: DF.Link | None
+		collection_name: DF.DynamicLink | None
+		company: DF.Link
+		cost_center: DF.TableMultiSelect[PSOACostCenter]
+		currency: DF.Link | None
+		customer_collection: DF.Literal[
+			"", "Customer Group", "Territory", "Sales Partner", "Sales Person"
+		]
+		customers: DF.Table[ProcessStatementOfAccountsCustomer]
+		enable_auto_email: DF.Check
+		filter_duration: DF.Int
+		finance_book: DF.Link | None
+		frequency: DF.Literal["Weekly", "Monthly", "Quarterly"]
+		from_date: DF.Date | None
+		group_by: DF.Literal["", "Group by Voucher", "Group by Voucher (Consolidated)"]
+		include_ageing: DF.Check
+		include_break: DF.Check
+		letter_head: DF.Link | None
+		orientation: DF.Literal["Landscape", "Portrait"]
+		payment_terms_template: DF.Link | None
+		pdf_name: DF.Data | None
+		posting_date: DF.Date | None
+		primary_mandatory: DF.Check
+		project: DF.TableMultiSelect[PSOAProject]
+		report: DF.Literal["General Ledger", "Accounts Receivable"]
+		sales_partner: DF.Link | None
+		sales_person: DF.Link | None
+		sender: DF.Link | None
+		show_net_values_in_party_account: DF.Check
+		start_date: DF.Date | None
+		subject: DF.Data | None
+		terms_and_conditions: DF.Link | None
+		territory: DF.Link | None
+		to_date: DF.Date | None
+	# end: auto-generated types
+
 	def validate(self):
 		if not self.subject:
 			self.subject = "Statement Of Accounts for {{ customer.customer_name }}"
@@ -48,6 +102,20 @@ class ProcessStatementOfAccounts(Document):
 
 
 def get_report_pdf(doc, consolidated=True):
+	statement_dict = get_statement_dict(doc)
+	if not bool(statement_dict):
+		return False
+	elif consolidated:
+		delimiter = '<div style="page-break-before: always;"></div>' if doc.include_break else ""
+		result = delimiter.join(list(statement_dict.values()))
+		return get_pdf(result, {"orientation": doc.orientation})
+	else:
+		for customer, statement_html in statement_dict.items():
+			statement_dict[customer] = get_pdf(statement_html, {"orientation": doc.orientation})
+		return statement_dict
+
+
+def get_statement_dict(doc, get_statement_dict=False):
 	statement_dict = {}
 	ageing = ""
 
@@ -78,18 +146,11 @@ def get_report_pdf(doc, consolidated=True):
 			if not res:
 				continue
 
-		statement_dict[entry.customer] = get_html(doc, filters, entry, col, res, ageing)
+		statement_dict[entry.customer] = (
+			[res, ageing] if get_statement_dict else get_html(doc, filters, entry, col, res, ageing)
+		)
 
-	if not bool(statement_dict):
-		return False
-	elif consolidated:
-		delimiter = '<div style="page-break-before: always;"></div>' if doc.include_break else ""
-		result = delimiter.join(list(statement_dict.values()))
-		return get_pdf(result, {"orientation": doc.orientation})
-	else:
-		for customer, statement_html in statement_dict.items():
-			statement_dict[customer] = get_pdf(statement_html, {"orientation": doc.orientation})
-		return statement_dict
+	return statement_dict
 
 
 def set_ageing(doc, entry):
@@ -102,7 +163,8 @@ def set_ageing(doc, entry):
 			"range2": 60,
 			"range3": 90,
 			"range4": 120,
-			"customer": entry.customer,
+			"party_type": "Customer",
+			"party": [entry.customer],
 		}
 	)
 	col1, ageing = get_ageing(ageing_filters)

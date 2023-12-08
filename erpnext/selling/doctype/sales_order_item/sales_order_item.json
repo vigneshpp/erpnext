@@ -162,7 +162,6 @@
    "oldfieldname": "description",
    "oldfieldtype": "Small Text",
    "print_width": "300px",
-   "reqd": 1,
    "width": "300px"
   },
   {
@@ -177,6 +176,7 @@
    "print_hide": 1
   },
   {
+   "fetch_from": "item_code.image",
    "fieldname": "image",
    "fieldtype": "Attach",
    "hidden": 1,
@@ -200,6 +200,7 @@
    "fieldtype": "Float",
    "in_list_view": 1,
    "label": "Quantity",
+   "non_negative": 1,
    "oldfieldname": "qty",
    "oldfieldtype": "Currency",
    "print_width": "100px",
@@ -895,7 +896,7 @@
  "idx": 1,
  "istable": 1,
  "links": [],
- "modified": "2023-07-28 14:56:42.031636",
+ "modified": "2023-11-24 13:24:55.756320",
  "modified_by": "Administrator",
  "module": "Selling",
  "name": "Sales Order Item",

@@ -11,6 +11,9 @@ def execute():
 	asset_depreciation_schedules_map = get_asset_depreciation_schedules_map()
 
 	for asset in assets:
+		if not asset_depreciation_schedules_map.get(asset.name):
+			continue
+
 		depreciation_schedules = asset_depreciation_schedules_map[asset.name]
 
 		for fb_row in asset_finance_books_map[asset.name]:
@@ -83,6 +86,7 @@ def get_asset_finance_books_map():
 			afb.frequency_of_depreciation,
 			afb.rate_of_depreciation,
 			afb.expected_value_after_useful_life,
+			afb.shift_based,
 		)
 		.where(asset.docstatus < 2)
 		.orderby(afb.idx)

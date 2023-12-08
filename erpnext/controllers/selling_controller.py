@@ -4,9 +4,9 @@
 
 import frappe
 from frappe import _, bold, throw
-from frappe.contacts.doctype.address.address import get_address_display
 from frappe.utils import cint, flt, get_link_to_form, nowtime
 
+from erpnext.accounts.party import render_address
 from erpnext.controllers.accounts_controller import get_taxes_and_charges
 from erpnext.controllers.sales_and_purchase_return import get_rate_for_return
 from erpnext.controllers.stock_controller import StockController
@@ -288,7 +288,9 @@ class SellingController(StockController):
 			last_valuation_rate_in_sales_uom = last_valuation_rate * (item.conversion_factor or 1)
 
 			if flt(item.base_net_rate) < flt(last_valuation_rate_in_sales_uom):
-				throw_message(item.idx, item.item_name, last_valuation_rate_in_sales_uom, "valuation rate")
+				throw_message(
+					item.idx, item.item_name, last_valuation_rate_in_sales_uom, "valuation rate (Moving Average)"
+				)
 
 	def get_item_list(self):
 		il = []
@@ -348,11 +350,12 @@ class SellingController(StockController):
 		return il
 
 	def has_product_bundle(self, item_code):
-		return frappe.db.sql(
-			"""select name from `tabProduct Bundle`
-			where new_item_code=%s and docstatus != 2""",
-			item_code,
-		)
+		product_bundle = frappe.qb.DocType("Product Bundle")
+		return (
+			frappe.qb.from_(product_bundle)
+			.select(product_bundle.name)
+			.where((product_bundle.new_item_code == item_code) & (product_bundle.disabled == 0))
+		).run()
 
 	def get_already_delivered_qty(self, current_docname, so, so_detail):
 		delivered_via_dn = frappe.db.sql(
@@ -441,6 +444,7 @@ class SellingController(StockController):
 							"company": self.company,
 							"voucher_type": self.doctype,
 							"voucher_no": self.name,
+							"voucher_detail_no": d.name,
 							"allow_zero_valuation": d.get("allow_zero_valuation"),
 						},
 						raise_error_if_no_rate=False,
@@ -600,7 +604,9 @@ class SellingController(StockController):
 
 		for address_field, address_display_field in address_dict.items():
 			if self.get(address_field):
-				self.set(address_display_field, get_address_display(self.get(address_field)))
+				self.set(
+					address_display_field, render_address(self.get(address_field), check_permissions=False)
+				)
 
 	def validate_for_duplicate_items(self):
 		check_list, chk_dupl_itm = [], []

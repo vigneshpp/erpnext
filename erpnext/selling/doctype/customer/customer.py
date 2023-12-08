@@ -15,19 +15,78 @@ from frappe.model.mapper import get_mapped_doc
 from frappe.model.naming import set_name_by_naming_series, set_name_from_naming_options
 from frappe.model.utils.rename_doc import update_linked_doctypes
 from frappe.utils import cint, cstr, flt, get_formatted_email, today
-from frappe.utils.nestedset import get_root_of
 from frappe.utils.user import get_users_with_role
 
-from erpnext.accounts.party import (  # noqa
-	get_dashboard_info,
-	get_timeline_data,
-	validate_party_accounts,
-)
+from erpnext.accounts.party import get_dashboard_info, validate_party_accounts  # noqa
 from erpnext.controllers.website_list_for_contact import add_role_for_portal_user
 from erpnext.utilities.transaction_base import TransactionBase
 
 
 class Customer(TransactionBase):
+	# begin: auto-generated types
+	# This code is auto-generated. Do not modify anything in this block.
+
+	from typing import TYPE_CHECKING
+
+	if TYPE_CHECKING:
+		from frappe.types import DF
+
+		from erpnext.accounts.doctype.allowed_to_transact_with.allowed_to_transact_with import (
+			AllowedToTransactWith,
+		)
+		from erpnext.accounts.doctype.party_account.party_account import PartyAccount
+		from erpnext.selling.doctype.customer_credit_limit.customer_credit_limit import (
+			CustomerCreditLimit,
+		)
+		from erpnext.selling.doctype.sales_team.sales_team import SalesTeam
+		from erpnext.utilities.doctype.portal_user.portal_user import PortalUser
+
+		account_manager: DF.Link | None
+		accounts: DF.Table[PartyAccount]
+		companies: DF.Table[AllowedToTransactWith]
+		credit_limits: DF.Table[CustomerCreditLimit]
+		customer_details: DF.Text | None
+		customer_group: DF.Link | None
+		customer_name: DF.Data
+		customer_pos_id: DF.Data | None
+		customer_primary_address: DF.Link | None
+		customer_primary_contact: DF.Link | None
+		customer_type: DF.Literal["Company", "Individual", "Proprietorship", "Partnership"]
+		default_bank_account: DF.Link | None
+		default_commission_rate: DF.Float
+		default_currency: DF.Link | None
+		default_price_list: DF.Link | None
+		default_sales_partner: DF.Link | None
+		disabled: DF.Check
+		dn_required: DF.Check
+		email_id: DF.ReadOnly | None
+		gender: DF.Link | None
+		image: DF.AttachImage | None
+		industry: DF.Link | None
+		is_frozen: DF.Check
+		is_internal_customer: DF.Check
+		language: DF.Link | None
+		lead_name: DF.Link | None
+		loyalty_program: DF.Link | None
+		loyalty_program_tier: DF.Data | None
+		market_segment: DF.Link | None
+		mobile_no: DF.ReadOnly | None
+		naming_series: DF.Literal["CUST-.YYYY.-"]
+		opportunity_name: DF.Link | None
+		payment_terms: DF.Link | None
+		portal_users: DF.Table[PortalUser]
+		primary_address: DF.Text | None
+		represents_company: DF.Link | None
+		sales_team: DF.Table[SalesTeam]
+		salutation: DF.Link | None
+		so_required: DF.Check
+		tax_category: DF.Link | None
+		tax_id: DF.Data | None
+		tax_withholding_category: DF.Link | None
+		territory: DF.Link | None
+		website: DF.Data | None
+	# end: auto-generated types
+
 	def onload(self):
 		"""Load address and contacts in `__onload`"""
 		load_address_and_contact(self)
@@ -81,7 +140,6 @@ class Customer(TransactionBase):
 		validate_party_accounts(self)
 		self.validate_credit_limit_on_change()
 		self.set_loyalty_program()
-		self.set_territory_and_group()
 		self.check_customer_group_change()
 		self.validate_default_bank_account()
 		self.validate_internal_customer()
@@ -140,12 +198,6 @@ class Customer(TransactionBase):
 					_("{0} is not a company bank account").format(frappe.bold(self.default_bank_account))
 				)
 
-	def set_territory_and_group(self):
-		if not self.territory:
-			self.territory = get_root_of("Territory")
-		if not self.customer_group:
-			self.customer_group = get_root_of("Customer Group")
-
 	def validate_internal_customer(self):
 		if not self.is_internal_customer:
 			self.represents_company = ""
@@ -198,6 +250,8 @@ class Customer(TransactionBase):
 				self.db_set("customer_primary_contact", contact.name)
 				self.db_set("mobile_no", self.mobile_no)
 				self.db_set("email_id", self.email_id)
+		elif self.customer_primary_contact:
+			frappe.set_value("Contact", self.customer_primary_contact, "is_primary_contact", 1)  # ensure
 
 	def create_primary_address(self):
 		from frappe.contacts.doctype.address.address import get_address_display
@@ -208,6 +262,8 @@ class Customer(TransactionBase):
 
 			self.db_set("customer_primary_address", address.name)
 			self.db_set("primary_address", address_display)
+		elif self.customer_primary_address:
+			frappe.set_value("Address", self.customer_primary_address, "is_primary_address", 1)  # ensure
 
 	def update_lead_status(self):
 		"""If Customer created from Lead, update lead status to "Converted"
@@ -313,22 +369,6 @@ class Customer(TransactionBase):
 					frappe.bold(self.customer_name)
 				)
 			)
-
-
-def create_contact(contact, party_type, party, email):
-	"""Create contact based on given contact name"""
-	contact = contact.split(" ")
-
-	contact = frappe.get_doc(
-		{
-			"doctype": "Contact",
-			"first_name": contact[0],
-			"last_name": len(contact) > 1 and contact[1] or "",
-		}
-	)
-	contact.append("email_ids", dict(email_id=email, is_primary=1))
-	contact.append("links", dict(link_doctype=party_type, link_name=party))
-	contact.insert()
 
 
 @frappe.whitelist()
@@ -507,6 +547,7 @@ def check_credit_limit(customer, company, ignore_outstanding_sales_order=False, 
 				primary_action={
 					"label": "Send Email",
 					"server_action": "erpnext.selling.doctype.customer.customer.send_emails",
+					"hide_on_success": True,
 					"args": {
 						"customer": customer,
 						"customer_outstanding": customer_outstanding,
@@ -546,7 +587,8 @@ def get_customer_outstanding(
 		"""
 		select sum(debit) - sum(credit)
 		from `tabGL Entry` where party_type = 'Customer'
-		and party = %s and company=%s {0}""".format(
+		and is_cancelled = 0 and party = %s
+		and company=%s {0}""".format(
 			cond
 		),
 		(customer, company),
@@ -647,24 +689,47 @@ def get_credit_limit(customer, company):
 
 
 def make_contact(args, is_primary_contact=1):
-	contact = frappe.get_doc(
-		{
-			"doctype": "Contact",
-			"first_name": args.get("name"),
-			"is_primary_contact": is_primary_contact,
-			"links": [{"link_doctype": args.get("doctype"), "link_name": args.get("name")}],
-		}
-	)
+	values = {
+		"doctype": "Contact",
+		"is_primary_contact": is_primary_contact,
+		"links": [{"link_doctype": args.get("doctype"), "link_name": args.get("name")}],
+	}
+
+	party_type = args.customer_type if args.doctype == "Customer" else args.supplier_type
+	party_name_key = "customer_name" if args.doctype == "Customer" else "supplier_name"
+
+	if party_type == "Individual":
+		first, middle, last = parse_full_name(args.get(party_name_key))
+		values.update(
+			{
+				"first_name": first,
+				"middle_name": middle,
+				"last_name": last,
+			}
+		)
+	else:
+		values.update(
+			{
+				"company_name": args.get(party_name_key),
+			}
+		)
+
+	contact = frappe.get_doc(values)
+
 	if args.get("email_id"):
 		contact.add_email(args.get("email_id"), is_primary=True)
 	if args.get("mobile_no"):
 		contact.add_phone(args.get("mobile_no"), is_primary_mobile_no=True)
-	contact.insert()
+
+	if flags := args.get("flags"):
+		contact.insert(ignore_permissions=flags.get("ignore_permissions"))
+	else:
+		contact.insert()
 
 	return contact
 
 
-def make_address(args, is_primary_address=1):
+def make_address(args, is_primary_address=1, is_shipping_address=1):
 	reqd_fields = []
 	for field in ["city", "country"]:
 		if not args.get(field):
@@ -677,19 +742,28 @@ def make_address(args, is_primary_address=1):
 			title=_("Missing Values Required"),
 		)
 
+	party_name_key = "customer_name" if args.doctype == "Customer" else "supplier_name"
+
 	address = frappe.get_doc(
 		{
 			"doctype": "Address",
-			"address_title": args.get("name"),
+			"address_title": args.get(party_name_key),
 			"address_line1": args.get("address_line1"),
 			"address_line2": args.get("address_line2"),
 			"city": args.get("city"),
 			"state": args.get("state"),
 			"pincode": args.get("pincode"),
 			"country": args.get("country"),
+			"is_primary_address": is_primary_address,
+			"is_shipping_address": is_shipping_address,
 			"links": [{"link_doctype": args.get("doctype"), "link_name": args.get("name")}],
 		}
-	).insert()
+	)
+
+	if flags := args.get("flags"):
+		address.insert(ignore_permissions=flags.get("ignore_permissions"))
+	else:
+		address.insert()
 
 	return address
 
@@ -710,3 +784,13 @@ def get_customer_primary_contact(doctype, txt, searchfield, start, page_len, fil
 		.where((dlink.link_name == customer) & (con.name.like(f"%{txt}%")))
 		.run()
 	)
+
+
+def parse_full_name(full_name: str) -> tuple[str, str | None, str | None]:
+	"""Parse full name into first name, middle name and last name"""
+	names = full_name.split()
+	first_name = names[0]
+	middle_name = " ".join(names[1:-1]) if len(names) > 2 else None
+	last_name = names[-1] if len(names) > 1 else None
+
+	return first_name, middle_name, last_name
