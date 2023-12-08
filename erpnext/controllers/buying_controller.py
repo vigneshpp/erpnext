@@ -4,7 +4,7 @@
 
 import frappe
 from frappe import ValidationError, _, msgprint
-from frappe.contacts.doctype.address.address import get_address_display
+from frappe.contacts.doctype.address.address import render_address
 from frappe.utils import cint, cstr, flt, getdate
 
 from erpnext.accounts.doctype.budget.budget import validate_expense_against_budget
@@ -14,7 +14,8 @@ from erpnext.controllers.sales_and_purchase_return import get_rate_for_return
 from erpnext.controllers.stock_controller import StockController
 from erpnext.controllers.subcontracting import Subcontracting
 from erpnext.stock.get_item_details import get_conversion_factor
-from erpnext.stock.utils import get_incoming_rate
+from erpnext.stock.stock_ledger import get_previous_sle
+from erpnext.stock.utils import get_incoming_rate, get_valuation_method
 
 
 class QtyMismatchError(ValidationError):
@@ -186,7 +187,9 @@ class BuyingController(StockController, Subcontracting):
 
 		for address_field, address_display_field in address_dict.items():
 			if self.get(address_field):
-				self.set(address_display_field, get_address_display(self.get(address_field)))
+				self.set(
+					address_display_field, render_address(self.get(address_field), check_permissions=False)
+				)
 
 	def set_total_in_words(self):
 		from frappe.utils import money_in_words
@@ -504,9 +507,20 @@ class BuyingController(StockController, Subcontracting):
 					)
 
 					if self.is_return:
-						outgoing_rate = get_rate_for_return(
-							self.doctype, self.name, d.item_code, self.return_against, item_row=d
-						)
+						if get_valuation_method(d.item_code) == "Moving Average":
+							previous_sle = get_previous_sle(
+								{
+									"item_code": d.item_code,
+									"warehouse": d.warehouse,
+									"posting_date": self.posting_date,
+									"posting_time": self.posting_time,
+								}
+							)
+							outgoing_rate = flt(previous_sle.get("valuation_rate"))
+						else:
+							outgoing_rate = get_rate_for_return(
+								self.doctype, self.name, d.item_code, self.return_against, item_row=d
+							)
 
 						sle.update({"outgoing_rate": outgoing_rate, "recalculate_rate": 1})
 						if d.from_warehouse:
