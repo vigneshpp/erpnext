@@ -40,7 +40,7 @@ class AssetMaintenance(Document):
 			if getdate(task.next_due_date) < getdate(nowdate()):
 				task.maintenance_status = "Overdue"
 			if not task.assign_to and self.docstatus == 0:
-				throw(_("Row #{}: Please asign task to a member.").format(task.idx))
+				throw(_("Row #{}: Please assign task to a member.").format(task.idx))
 
 	def on_update(self):
 		for task in self.get("asset_maintenance_tasks"):
@@ -92,9 +92,7 @@ def calculate_next_due_date(
 	if not start_date and not last_completion_date:
 		start_date = frappe.utils.now()
 
-	if last_completion_date and (
-		(start_date and last_completion_date > start_date) or not start_date
-	):
+	if last_completion_date and ((start_date and last_completion_date > start_date) or not start_date):
 		start_date = last_completion_date
 	if periodicity == "Daily":
 		next_due_date = add_days(start_date, 1)

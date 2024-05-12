@@ -51,10 +51,10 @@ class Department(NestedSet):
 
 	def on_update(self):
 		if not (frappe.local.flags.ignore_update_nsm or frappe.flags.in_setup_wizard):
-			super(Department, self).on_update()
+			super().on_update()
 
 	def on_trash(self):
-		super(Department, self).on_trash()
+		super().on_trash()
 		delete_events(self.doctype, self.name)
 
 
@@ -64,12 +64,14 @@ def on_doctype_update():
 
 def get_abbreviated_name(name, company):
 	abbr = frappe.get_cached_value("Company", company, "abbr")
-	new_name = "{0} - {1}".format(name, abbr)
+	new_name = f"{name} - {abbr}"
 	return new_name
 
 
 @frappe.whitelist()
-def get_children(doctype, parent=None, company=None, is_root=False):
+def get_children(doctype, parent=None, company=None, is_root=False, include_disabled=False):
+	if isinstance(include_disabled, str):
+		include_disabled = frappe.json.loads(include_disabled)
 	fields = ["name as value", "is_group as expandable"]
 	filters = {}
 
@@ -80,6 +82,9 @@ def get_children(doctype, parent=None, company=None, is_root=False):
 		filters["company"] = company
 	else:
 		filters["parent_department"] = parent
+
+	if frappe.db.has_column(doctype, "disabled") and not include_disabled:
+		filters["disabled"] = False
 
 	return frappe.get_all("Department", fields=fields, filters=filters, order_by="name")
 

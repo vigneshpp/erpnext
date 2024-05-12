@@ -34,7 +34,7 @@ class Quotation(SellingController):
 		from erpnext.stock.doctype.packed_item.packed_item import PackedItem
 
 		additional_discount_percentage: DF.Float
-		address_display: DF.SmallText | None
+		address_display: DF.TextEditor | None
 		amended_from: DF.Link | None
 		apply_discount_on: DF.Literal["", "Grand Total", "Net Total"]
 		auto_repeat: DF.Link | None
@@ -49,7 +49,7 @@ class Quotation(SellingController):
 		campaign: DF.Link | None
 		company: DF.Link
 		company_address: DF.Link | None
-		company_address_display: DF.SmallText | None
+		company_address_display: DF.TextEditor | None
 		competitors: DF.TableMultiSelect[CompetitorDetail]
 		contact_display: DF.SmallText | None
 		contact_email: DF.Data | None
@@ -78,7 +78,7 @@ class Quotation(SellingController):
 		opportunity: DF.Link | None
 		order_lost_reason: DF.SmallText | None
 		order_type: DF.Literal["", "Sales", "Maintenance", "Shopping Cart"]
-		other_charges_calculation: DF.LongText | None
+		other_charges_calculation: DF.TextEditor | None
 		packed_items: DF.Table[PackedItem]
 		party_name: DF.DynamicLink | None
 		payment_schedule: DF.Table[PaymentSchedule]
@@ -93,7 +93,7 @@ class Quotation(SellingController):
 		scan_barcode: DF.Data | None
 		select_print_heading: DF.Link | None
 		selling_price_list: DF.Link
-		shipping_address: DF.SmallText | None
+		shipping_address: DF.TextEditor | None
 		shipping_address_name: DF.Link | None
 		shipping_rule: DF.Link | None
 		source: DF.Link | None
@@ -125,9 +125,10 @@ class Quotation(SellingController):
 			self.indicator_title = "Expired"
 
 	def validate(self):
-		super(Quotation, self).validate()
+		super().validate()
 		self.set_status()
-		self.validate_uom_is_integer("stock_uom", "qty")
+		self.validate_uom_is_integer("stock_uom", "stock_qty")
+		self.validate_uom_is_integer("uom", "qty")
 		self.validate_valid_till()
 		self.set_customer_name()
 		if self.items:
@@ -187,7 +188,8 @@ class Quotation(SellingController):
 		def is_in_sales_order(row):
 			in_sales_order = bool(
 				frappe.db.exists(
-					"Sales Order Item", {"quotation_item": row.name, "item_code": row.item_code, "docstatus": 1}
+					"Sales Order Item",
+					{"quotation_item": row.name, "item_code": row.item_code, "docstatus": 1},
 				)
 			)
 			return in_sales_order
@@ -277,7 +279,7 @@ class Quotation(SellingController):
 	def on_cancel(self):
 		if self.lost_reasons:
 			self.lost_reasons = []
-		super(Quotation, self).on_cancel()
+		super().on_cancel()
 
 		# update enquiry status
 		self.set_status(update=True)
@@ -345,8 +347,8 @@ def make_sales_order(source_name: str, target_doc=None):
 	return _make_sales_order(source_name, target_doc)
 
 
-def _make_sales_order(source_name, target_doc=None, customer_group=None, ignore_permissions=False):
-	customer = _make_customer(source_name, ignore_permissions, customer_group)
+def _make_sales_order(source_name, target_doc=None, ignore_permissions=False):
+	customer = _make_customer(source_name, ignore_permissions)
 	ordered_items = frappe._dict(
 		frappe.db.get_all(
 			"Sales Order Item",
@@ -370,18 +372,18 @@ def _make_sales_order(source_name, target_doc=None, customer_group=None, ignore_
 			)
 
 		# sales team
-		for d in customer.get("sales_team") or []:
-			target.append(
-				"sales_team",
-				{
-					"sales_person": d.sales_person,
-					"allocated_percentage": d.allocated_percentage or None,
-					"commission_rate": d.commission_rate,
-				},
-			)
+		if not target.get("sales_team"):
+			for d in customer.get("sales_team") or []:
+				target.append(
+					"sales_team",
+					{
+						"sales_person": d.sales_person,
+						"allocated_percentage": d.allocated_percentage or None,
+						"commission_rate": d.commission_rate,
+					},
+				)
 
 		target.flags.ignore_permissions = ignore_permissions
-		target.delivery_date = nowdate()
 		target.run_method("set_missing_values")
 		target.run_method("calculate_taxes_and_totals")
 
@@ -389,7 +391,6 @@ def _make_sales_order(source_name, target_doc=None, customer_group=None, ignore_
 		balance_qty = obj.qty - ordered_items.get(obj.item_code, 0.0)
 		target.qty = balance_qty if balance_qty > 0 else 0
 		target.stock_qty = flt(target.qty) * flt(obj.conversion_factor)
-		target.delivery_date = nowdate()
 
 		if obj.against_blanket_order:
 			target.against_blanket_order = obj.against_blanket_order
@@ -452,12 +453,8 @@ def set_expired_status():
 	# if not exists any SO, set status as Expired
 	frappe.db.multisql(
 		{
-			"mariadb": """UPDATE `tabQuotation`  SET `tabQuotation`.status = 'Expired' WHERE {cond} and not exists({so_against_quo})""".format(
-				cond=cond, so_against_quo=so_against_quo
-			),
-			"postgres": """UPDATE `tabQuotation` SET status = 'Expired' FROM `tabSales Order`, `tabSales Order Item` WHERE {cond} and not exists({so_against_quo})""".format(
-				cond=cond, so_against_quo=so_against_quo
-			),
+			"mariadb": f"""UPDATE `tabQuotation`  SET `tabQuotation`.status = 'Expired' WHERE {cond} and not exists({so_against_quo})""",
+			"postgres": f"""UPDATE `tabQuotation` SET status = 'Expired' FROM `tabSales Order`, `tabSales Order Item` WHERE {cond} and not exists({so_against_quo})""",
 		},
 		(nowdate()),
 	)
@@ -505,50 +502,49 @@ def _make_sales_invoice(source_name, target_doc=None, ignore_permissions=False):
 	return doclist
 
 
-def _make_customer(source_name, ignore_permissions=False, customer_group=None):
+def _make_customer(source_name, ignore_permissions=False):
 	quotation = frappe.db.get_value(
-		"Quotation", source_name, ["order_type", "party_name", "customer_name"], as_dict=1
+		"Quotation",
+		source_name,
+		["order_type", "quotation_to", "party_name", "customer_name"],
+		as_dict=1,
 	)
 
-	if quotation and quotation.get("party_name"):
-		if not frappe.db.exists("Customer", quotation.get("party_name")):
-			lead_name = quotation.get("party_name")
-			customer_name = frappe.db.get_value(
-				"Customer", {"lead_name": lead_name}, ["name", "customer_name"], as_dict=True
-			)
-			if not customer_name:
-				from erpnext.crm.doctype.lead.lead import _make_customer
+	if quotation.quotation_to == "Customer":
+		return frappe.get_doc("Customer", quotation.party_name)
 
-				customer_doclist = _make_customer(lead_name, ignore_permissions=ignore_permissions)
-				customer = frappe.get_doc(customer_doclist)
-				customer.flags.ignore_permissions = ignore_permissions
-				customer.customer_group = customer_group
+	# If the Quotation is not to a Customer, it must be to a Lead.
+	# Check if a Customer already exists for the Lead.
+	existing_customer_for_lead = frappe.db.get_value("Customer", {"lead_name": quotation.party_name})
+	if existing_customer_for_lead:
+		return frappe.get_doc("Customer", existing_customer_for_lead)
 
-				try:
-					customer.insert()
-					return customer
-				except frappe.NameError:
-					if frappe.defaults.get_global_default("cust_master_name") == "Customer Name":
-						customer.run_method("autoname")
-						customer.name += "-" + lead_name
-						customer.insert()
-						return customer
-					else:
-						raise
-				except frappe.MandatoryError as e:
-					mandatory_fields = e.args[0].split(":")[1].split(",")
-					mandatory_fields = [customer.meta.get_label(field.strip()) for field in mandatory_fields]
+	# If no Customer exists for the Lead, create a new Customer.
+	return create_customer_from_lead(quotation.party_name, ignore_permissions=ignore_permissions)
 
-					frappe.local.message_log = []
-					lead_link = frappe.utils.get_link_to_form("Lead", lead_name)
-					message = (
-						_("Could not auto create Customer due to the following missing mandatory field(s):") + "<br>"
-					)
-					message += "<br><ul><li>" + "</li><li>".join(mandatory_fields) + "</li></ul>"
-					message += _("Please create Customer from Lead {0}.").format(lead_link)
 
-					frappe.throw(message, title=_("Mandatory Missing"))
-			else:
-				return customer_name
-		else:
-			return frappe.get_doc("Customer", quotation.get("party_name"))
+def create_customer_from_lead(lead_name, ignore_permissions=False):
+	from erpnext.crm.doctype.lead.lead import _make_customer
+
+	customer = _make_customer(lead_name, ignore_permissions=ignore_permissions)
+	customer.flags.ignore_permissions = ignore_permissions
+
+	try:
+		customer.insert()
+		return customer
+	except frappe.MandatoryError as e:
+		handle_mandatory_error(e, customer, lead_name)
+
+
+def handle_mandatory_error(e, customer, lead_name):
+	from frappe.utils import get_link_to_form
+
+	mandatory_fields = e.args[0].split(":")[1].split(",")
+	mandatory_fields = [customer.meta.get_label(field.strip()) for field in mandatory_fields]
+
+	frappe.local.message_log = []
+	message = _("Could not auto create Customer due to the following missing mandatory field(s):") + "<br>"
+	message += "<br><ul><li>" + "</li><li>".join(mandatory_fields) + "</li></ul>"
+	message += _("Please create Customer from Lead {0}.").format(get_link_to_form("Lead", lead_name))
+
+	frappe.throw(message, title=_("Mandatory Missing"))
