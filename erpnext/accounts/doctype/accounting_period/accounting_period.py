@@ -28,6 +28,7 @@ class AccountingPeriod(Document):
 
 		closed_documents: DF.Table[ClosedDocument]
 		company: DF.Link
+		disabled: DF.Check
 		end_date: DF.Date
 		period_name: DF.Data
 		start_date: DF.Date
@@ -101,6 +102,8 @@ def validate_accounting_period_on_doc_save(doc, method=None):
 			date = doc.available_for_use_date
 	elif doc.doctype == "Asset Repair":
 		date = doc.completion_date
+	elif doc.doctype == "Period Closing Voucher":
+		date = doc.period_end_date
 	else:
 		date = doc.posting_date
 
@@ -114,6 +117,7 @@ def validate_accounting_period_on_doc_save(doc, method=None):
 		.where(
 			(ap.name == cd.parent)
 			& (ap.company == doc.company)
+			& (ap.disabled == 0)
 			& (cd.closed == 1)
 			& (cd.document_type == doc.doctype)
 			& (date >= ap.start_date)

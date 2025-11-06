@@ -46,7 +46,8 @@ def validate_service_stop_date(doc):
 		if (
 			old_stop_dates
 			and old_stop_dates.get(item.name)
-			and item.service_stop_date != old_stop_dates.get(item.name)
+			and item.service_stop_date
+			and getdate(item.service_stop_date) != getdate(old_stop_dates.get(item.name))
 		):
 			frappe.throw(_("Cannot change Service Stop Date for item in row {0}").format(item.idx))
 
@@ -58,7 +59,7 @@ def build_conditions(process_type, account, company):
 	)
 
 	if account:
-		conditions += f"AND {deferred_account}='{account}'"
+		conditions += f"AND {deferred_account}={frappe.db.escape(account)}"
 	elif company:
 		conditions += f"AND p.company = {frappe.db.escape(company)}"
 
@@ -317,7 +318,7 @@ def get_already_booked_amount(doc, item):
 def book_deferred_income_or_expense(doc, deferred_process, posting_date=None):
 	enable_check = "enable_deferred_revenue" if doc.doctype == "Sales Invoice" else "enable_deferred_expense"
 
-	accounts_frozen_upto = frappe.db.get_single_value("Accounts Settings", "acc_frozen_upto")
+	accounts_frozen_upto = frappe.get_single_value("Accounts Settings", "acc_frozen_upto")
 
 	def _book_deferred_revenue_or_expense(
 		item,
@@ -526,7 +527,7 @@ def make_gl_entries(
 			make_gl_entries(gl_entries, cancel=(doc.docstatus == 2), merge_entries=True)
 			frappe.db.commit()
 		except Exception as e:
-			if frappe.flags.in_test:
+			if frappe.in_test:
 				doc.log_error(f"Error while processing deferred accounting for Invoice {doc.name}")
 				raise e
 			else:

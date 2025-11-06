@@ -45,7 +45,6 @@ class Opportunity(TransactionBase, CRMNote):
 		annual_revenue: DF.Currency
 		base_opportunity_amount: DF.Currency
 		base_total: DF.Currency
-		campaign: DF.Link | None
 		city: DF.Data | None
 		company: DF.Link
 		competitors: DF.TableMultiSelect[CompetitorDetail]
@@ -80,20 +79,42 @@ class Opportunity(TransactionBase, CRMNote):
 		phone_ext: DF.Data | None
 		probability: DF.Percent
 		sales_stage: DF.Link | None
-		source: DF.Link | None
 		state: DF.Data | None
 		status: DF.Literal["Open", "Quotation", "Converted", "Lost", "Replied", "Closed"]
 		territory: DF.Link | None
 		title: DF.Data | None
 		total: DF.Currency
 		transaction_date: DF.Date
+		utm_campaign: DF.Link | None
+		utm_content: DF.Data | None
+		utm_medium: DF.Link | None
+		utm_source: DF.Link | None
 		website: DF.Data | None
 		whatsapp: DF.Data | None
 	# end: auto-generated types
 
 	def onload(self):
 		ref_doc = frappe.get_doc(self.opportunity_from, self.party_name)
+
 		load_address_and_contact(ref_doc)
+		load_address_and_contact(self)
+
+		ref_doc_contact_list = ref_doc.get("__onload").get("contact_list")
+		opportunity_doc_contact_list = [
+			contact
+			for contact in self.get("__onload").get("contact_list")
+			if contact not in ref_doc_contact_list
+		]
+		ref_doc_contact_list.extend(opportunity_doc_contact_list)
+		ref_doc.set_onload("contact_list", ref_doc_contact_list)
+
+		ref_doc_addr_list = ref_doc.get("__onload").get("addr_list")
+		opportunity_doc_addr_list = [
+			addr for addr in self.get("__onload").get("addr_list") if addr not in ref_doc_addr_list
+		]
+		ref_doc_addr_list.extend(opportunity_doc_addr_list)
+		ref_doc.set_onload("addr_list", ref_doc_addr_list)
+
 		self.set("__onload", ref_doc.get("__onload"))
 
 	def after_insert(self):
@@ -107,6 +128,7 @@ class Opportunity(TransactionBase, CRMNote):
 				link_communications(self.opportunity_from, self.party_name, self)
 
 	def validate(self):
+		self.set_opportunity_type()
 		self.make_new_lead_if_required()
 		self.validate_item_details()
 		self.validate_uom_is_integer("uom", "qty")
@@ -118,6 +140,8 @@ class Opportunity(TransactionBase, CRMNote):
 			self.title = self.customer_name
 
 		self.calculate_totals()
+
+	def on_update(self):
 		self.update_prospect()
 
 	def map_fields(self):
@@ -128,6 +152,10 @@ class Opportunity(TransactionBase, CRMNote):
 					self.set(field, value)
 				except Exception:
 					continue
+
+	def set_opportunity_type(self):
+		if self.is_new() and not self.opportunity_type:
+			self.opportunity_type = _("Sales")
 
 	def set_exchange_rate(self):
 		company_currency = frappe.get_cached_value("Company", self.company, "default_currency")

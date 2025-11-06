@@ -4,15 +4,16 @@
 
 import frappe
 from frappe import _
+from frappe.utils import getdate
 
 
 def execute(filters=None):
 	if filters.get("party_type") == "Customer":
-		party_naming_by = frappe.db.get_single_value("Selling Settings", "cust_master_name")
+		party_naming_by = frappe.get_single_value("Selling Settings", "cust_master_name")
 	else:
 		party_naming_by = frappe.db.get_single_value("Buying Settings", "supp_master_name")
 
-	filters.update({"naming_series": party_naming_by})
+	filters["naming_series"] = party_naming_by
 
 	validate_filters(filters)
 	(
@@ -33,6 +34,7 @@ def execute(filters=None):
 
 def validate_filters(filters):
 	"""Validate if dates are properly set"""
+	filters = frappe._dict(filters or {})
 	if filters.from_date > filters.to_date:
 		frappe.throw(_("From Date must be before To Date"))
 
@@ -43,6 +45,7 @@ def get_result(filters, tds_docs, tds_accounts, tax_category_map, journal_entry_
 	gle_map = get_gle_map(tds_docs)
 
 	out = []
+	entries = {}
 	for name, details in gle_map.items():
 		for entry in details:
 			tax_amount, total_amount, grand_total, base_total = 0, 0, 0, 0
@@ -63,21 +66,23 @@ def get_result(filters, tds_docs, tds_accounts, tax_category_map, journal_entry_
 				tax_withholding_category = tds_accounts.get(entry.account)
 				# or else the consolidated value from the voucher document
 				if not tax_withholding_category:
-					tax_withholding_category = tax_category_map.get(name)
+					tax_withholding_category = tax_category_map.get((voucher_type, name))
 				# or else from the party default
 				if not tax_withholding_category:
 					tax_withholding_category = party_map.get(party, {}).get("tax_withholding_category")
 
-				rate = tax_rate_map.get(tax_withholding_category)
-			if net_total_map.get(name):
+				rate = get_tax_withholding_rates(tax_rate_map.get(tax_withholding_category, []), posting_date)
+			if net_total_map.get((voucher_type, name)):
 				if voucher_type == "Journal Entry" and tax_amount and rate:
 					# back calcalute total amount from rate and tax_amount
-					if rate:
-						total_amount = grand_total = base_total = tax_amount / (rate / 100)
+					base_total = min(tax_amount / (rate / 100), net_total_map.get((voucher_type, name))[0])
+					total_amount = grand_total = base_total
 				elif voucher_type == "Purchase Invoice":
-					total_amount, grand_total, base_total, bill_no, bill_date = net_total_map.get(name)
+					total_amount, grand_total, base_total, bill_no, bill_date = net_total_map.get(
+						(voucher_type, name)
+					)
 				else:
-					total_amount, grand_total, base_total = net_total_map.get(name)
+					total_amount, grand_total, base_total = net_total_map.get((voucher_type, name))
 			else:
 				total_amount += entry.credit
 
@@ -97,7 +102,7 @@ def get_result(filters, tds_docs, tds_accounts, tax_category_map, journal_entry_
 				}
 
 				if filters.naming_series == "Naming Series":
-					row.update({"party_name": party_map.get(party, {}).get(party_name)})
+					row["party_name"] = party_map.get(party, {}).get(party_name)
 
 				row.update(
 					{
@@ -115,9 +120,14 @@ def get_result(filters, tds_docs, tds_accounts, tax_category_map, journal_entry_
 						"supplier_invoice_date": bill_date,
 					}
 				)
-				out.append(row)
 
-	out.sort(key=lambda x: x["section_code"])
+				key = entry.voucher_no
+				if key in entries:
+					entries[key]["tax_amount"] += tax_amount
+				else:
+					entries[key] = row
+	out = list(entries.values())
+	out.sort(key=lambda x: (x["section_code"], x["transaction_date"]))
 
 	return out
 
@@ -279,7 +289,6 @@ def get_tds_docs(filters):
 	journal_entries = []
 	tax_category_map = frappe._dict()
 	net_total_map = frappe._dict()
-	frappe._dict()
 	journal_entry_party_map = frappe._dict()
 	bank_accounts = frappe.get_all("Account", {"is_group": 0, "account_type": "Bank"}, pluck="name")
 
@@ -335,7 +344,7 @@ def get_tds_docs(filters):
 def get_tds_docs_query(filters, bank_accounts, tds_accounts):
 	if not tds_accounts:
 		frappe.throw(
-			_("No {0} Accounts found for this company.").format(frappe.bold("Tax Withholding")),
+			_("No {0} Accounts found for this company.").format(frappe.bold(_("Tax Withholding"))),
 			title=_("Accounts Missing Error"),
 		)
 	gle = frappe.qb.DocType("GL Entry")
@@ -408,7 +417,7 @@ def get_doc_info(vouchers, doctype, tax_category_map, net_total_map=None):
 			"paid_amount_after_tax",
 			"base_paid_amount",
 		],
-		"Journal Entry": ["total_amount"],
+		"Journal Entry": ["tax_withholding_category", "total_debit"],
 	}
 
 	entries = frappe.get_all(
@@ -416,7 +425,7 @@ def get_doc_info(vouchers, doctype, tax_category_map, net_total_map=None):
 	)
 
 	for entry in entries:
-		tax_category_map.update({entry.name: entry.tax_withholding_category})
+		tax_category_map[(doctype, entry.name)] = entry.tax_withholding_category
 		if doctype == "Purchase Invoice":
 			value = [
 				entry.base_tax_withholding_net_total,
@@ -430,19 +439,30 @@ def get_doc_info(vouchers, doctype, tax_category_map, net_total_map=None):
 		elif doctype == "Payment Entry":
 			value = [entry.paid_amount, entry.paid_amount_after_tax, entry.base_paid_amount]
 		else:
-			value = [entry.total_amount] * 3
-		net_total_map.update({entry.name: value})
+			value = [entry.total_debit] * 3
+
+		net_total_map[(doctype, entry.name)] = value
 
 
 def get_tax_rate_map(filters):
 	rate_map = frappe.get_all(
 		"Tax Withholding Rate",
-		filters={
-			"from_date": ("<=", filters.get("from_date")),
-			"to_date": (">=", filters.get("to_date")),
-		},
-		fields=["parent", "tax_withholding_rate"],
-		as_list=1,
+		filters={"from_date": ("<=", filters.to_date), "to_date": (">=", filters.from_date)},
+		fields=["parent", "tax_withholding_rate", "from_date", "to_date"],
 	)
 
-	return frappe._dict(rate_map)
+	rate_list = frappe._dict()
+
+	for rate in rate_map:
+		rate_list.setdefault(rate.parent, []).append(frappe._dict(rate))
+
+	return rate_list
+
+
+def get_tax_withholding_rates(tax_withholding, posting_date):
+	# returns the row that matches with the fiscal year from posting date
+	for rate in tax_withholding:
+		if getdate(rate.from_date) <= getdate(posting_date) <= getdate(rate.to_date):
+			return rate.tax_withholding_rate
+
+	return 0

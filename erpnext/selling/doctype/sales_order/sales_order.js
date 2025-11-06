@@ -23,21 +23,16 @@ frappe.ui.form.on("Sales Order", {
 
 		// formatter for material request item
 		frm.set_indicator_formatter("item_code", function (doc) {
-			return doc.stock_qty <= doc.delivered_qty ? "green" : "orange";
-		});
-
-		frm.set_query("company_address", function (doc) {
-			if (!doc.company) {
-				frappe.throw(__("Please set Company"));
+			let color;
+			if (!doc.qty && frm.doc.has_unit_price_items) {
+				color = "yellow";
+			} else if (doc.stock_qty <= doc.delivered_qty) {
+				color = "green";
+			} else {
+				color = "orange";
 			}
 
-			return {
-				query: "frappe.contacts.doctype.address.address.address_query",
-				filters: {
-					link_doctype: "Company",
-					link_name: doc.company,
-				},
-			};
+			return color;
 		});
 
 		frm.set_query("bom_no", "items", function (doc, cdt, cdn) {
@@ -45,6 +40,15 @@ frappe.ui.form.on("Sales Order", {
 			return {
 				filters: {
 					item: row.item_code,
+				},
+			};
+		});
+
+		frm.set_query("sales_person", "sales_team", function () {
+			return {
+				filters: {
+					is_group: 0,
+					enabled: 1,
 				},
 			};
 		});
@@ -57,8 +61,10 @@ frappe.ui.form.on("Sales Order", {
 		if (frm.doc.docstatus === 1) {
 			if (
 				frm.doc.status !== "Closed" &&
-				flt(frm.doc.per_delivered, 2) < 100 &&
-				flt(frm.doc.per_billed, 2) < 100
+				flt(frm.doc.per_delivered) < 100 &&
+				flt(frm.doc.per_billed) < 100 &&
+				frm.has_perm("write") &&
+				!frm.doc.is_subcontracted
 			) {
 				frm.add_custom_button(__("Update Items"), () => {
 					erpnext.utils.update_child_items({
@@ -85,7 +91,12 @@ frappe.ui.form.on("Sales Order", {
 			}
 
 			// Stock Reservation > Unreserve button will be only visible if the SO has un-delivered reserved stock.
-			if (frm.doc.__onload && frm.doc.__onload.has_reserved_stock) {
+			if (
+				frm.doc.__onload &&
+				frm.doc.__onload.has_reserved_stock &&
+				frappe.model.can_cancel("Stock Reservation Entry") &&
+				!frm.doc.is_subcontracted
+			) {
 				frm.add_custom_button(
 					__("Unreserve"),
 					() => frm.events.cancel_stock_reservation_entries(frm),
@@ -93,24 +104,31 @@ frappe.ui.form.on("Sales Order", {
 				);
 			}
 
-			frm.doc.items.forEach((item) => {
-				if (flt(item.stock_reserved_qty) > 0) {
-					frm.add_custom_button(
-						__("Reserved Stock"),
-						() => frm.events.show_reserved_stock(frm),
-						__("Stock Reservation")
-					);
-					return;
-				}
-			});
+			if (!frm.doc.is_subcontracted) {
+				frm.doc.items.forEach((item) => {
+					if (
+						flt(item.stock_reserved_qty) > 0 &&
+						frappe.model.can_read("Stock Reservation Entry")
+					) {
+						frm.add_custom_button(
+							__("Reserved Stock"),
+							() => frm.events.show_reserved_stock(frm),
+							__("Stock Reservation")
+						);
+						return;
+					}
+				});
+			}
 		}
 
 		if (frm.doc.docstatus === 0) {
+			erpnext.set_unit_price_items_note(frm);
+
 			if (frm.doc.is_internal_customer) {
 				frm.events.get_items_from_internal_purchase_order(frm);
 			}
 
-			if (frm.doc.docstatus === 0) {
+			if (frm.doc.docstatus === 0 && !frm.doc.is_subcontracted) {
 				frappe.call({
 					method: "erpnext.selling.doctype.sales_order.sales_order.get_stock_reservation_status",
 					callback: function (r) {
@@ -142,6 +160,10 @@ frappe.ui.form.on("Sales Order", {
 	},
 
 	get_items_from_internal_purchase_order(frm) {
+		if (!frappe.model.can_read("Purchase Order")) {
+			return;
+		}
+
 		frm.add_custom_button(
 			__("Purchase Order"),
 			() => {
@@ -151,7 +173,7 @@ frappe.ui.form.on("Sales Order", {
 					target: frm,
 					setters: [
 						{
-							label: "Supplier",
+							label: __("Supplier"),
 							fieldname: "supplier",
 							fieldtype: "Link",
 							options: "Supplier",
@@ -169,41 +191,26 @@ frappe.ui.form.on("Sales Order", {
 		);
 	},
 
-	// When multiple companies are set up. in case company name is changed set default company address
-	company: function (frm) {
-		if (frm.doc.company) {
-			frappe.call({
-				method: "erpnext.setup.doctype.company.company.get_default_company_address",
-				args: {
-					name: frm.doc.company,
-					existing_address: frm.doc.company_address || "",
-				},
-				debounce: 2000,
-				callback: function (r) {
-					if (r.message) {
-						frm.set_value("company_address", r.message);
-					} else {
-						frm.set_value("company_address", "");
-					}
-				},
-			});
-		}
-	},
-
 	onload: function (frm) {
 		if (!frm.doc.transaction_date) {
 			frm.set_value("transaction_date", frappe.datetime.get_today());
 		}
 		erpnext.queries.setup_queries(frm, "Warehouse", function () {
 			return {
-				filters: [["Warehouse", "company", "in", ["", cstr(frm.doc.company)]]],
+				filters: [
+					["Warehouse", "company", "in", ["", cstr(frm.doc.company)]],
+					["Warehouse", "is_group", "=", 0],
+				],
 			};
 		});
 
 		frm.set_query("warehouse", "items", function (doc, cdt, cdn) {
 			let row = locals[cdt][cdn];
 			let query = {
-				filters: [["Warehouse", "company", "in", ["", cstr(frm.doc.company)]]],
+				filters: [
+					["Warehouse", "company", "in", ["", cstr(frm.doc.company)]],
+					["Warehouse", "is_group", "=", 0],
+				],
 			};
 			if (row.item_code) {
 				query.query = "erpnext.controllers.queries.warehouse_query";
@@ -217,7 +224,12 @@ frappe.ui.form.on("Sales Order", {
 			frm.set_value("advance_paid", 0);
 		}
 
-		frm.ignore_doctypes_on_cancel_all = ["Purchase Order"];
+		frm.ignore_doctypes_on_cancel_all = [
+			"Purchase Order",
+			"Unreconcile Payment",
+			"Unreconcile Payment Entries",
+			"Delivery Schedule Item",
+		];
 	},
 
 	delivery_date: function (frm) {
@@ -550,10 +562,231 @@ frappe.ui.form.on("Sales Order", {
 		};
 		frappe.set_route("query-report", "Reserved Stock");
 	},
+
+	prepare_delivery_schedule(frm, row, data) {
+		let fields = [
+			{
+				fieldtype: "Date",
+				fieldname: "delivery_date",
+				label: __("First Delivery Date"),
+				reqd: 1,
+				default: row.delivery_date || frm.doc.delivery_date || frappe.datetime.get_today(),
+			},
+			{
+				fieldtype: "Float",
+				fieldname: "qty",
+				label: __("Qty"),
+				read_only: 1,
+				default: row.qty || 0,
+			},
+			{
+				fieldtype: "Column Break",
+			},
+			{
+				fieldtype: "Select",
+				fieldname: "frequency",
+				label: __("Frequency"),
+				options: "\nWeekly\nMonthly\nQuarterly\nHalf Yearly\nYearly",
+			},
+			{
+				fieldtype: "Int",
+				fieldname: "no_of_deliveries",
+				label: __("No of Deliveries"),
+			},
+			{
+				fieldtype: "Section Break",
+			},
+			{
+				fieldtype: "Button",
+				fieldname: "get_delivery_schedule",
+				label: __("Get Delivery Schedule"),
+				click: () => {
+					frappe.db.get_value("UOM", row.uom, "must_be_whole_number", (r) => {
+						frm.events.add_delivery_schedule(frm, row, r.must_be_whole_number);
+					});
+				},
+			},
+			{
+				fieldtype: "Table",
+				data: [],
+				fieldname: "delivery_schedule",
+				label: __("Delivery Schedule"),
+				fields: [
+					{
+						fieldtype: "Date",
+						fieldname: "delivery_date",
+						label: __("Delivery Date"),
+						reqd: 1,
+						in_list_view: 1,
+					},
+					{
+						fieldtype: "Float",
+						fieldname: "qty",
+						label: __("Qty"),
+						reqd: 1,
+						in_list_view: 1,
+					},
+					{
+						fieldtype: "Data",
+						fieldname: "Name",
+						label: __("name"),
+						read_only: 1,
+					},
+				],
+			},
+		];
+
+		frm.schedule_dialog = new frappe.ui.Dialog({
+			title: __("Delivery Schedule"),
+			fields: fields,
+			size: "large",
+			primary_action_label: __("Add Schedule"),
+			primary_action: (data) => {
+				if (!data.delivery_schedule || !data.delivery_schedule.length) {
+					frappe.throw(__("Please enter at least one delivery date and quantity"));
+				}
+
+				let total_qty = 0;
+				data.delivery_schedule.forEach((d) => {
+					if (!d.qty) {
+						frappe.throw(__("Please enter a valid quantity"));
+					}
+					total_qty += flt(d.qty);
+				});
+
+				if (total_qty > flt(row.qty)) {
+					frappe.throw(
+						__("Total quantity in delivery schedule cannot be greater than the item quantity")
+					);
+				}
+
+				frappe.call({
+					doc: frm.doc,
+					method: "create_delivery_schedule",
+					args: {
+						child_row: row,
+						schedules: data.delivery_schedule,
+					},
+					freeze: true,
+					freeze_message: __("Creating Delivery Schedule..."),
+					callback: function () {
+						frm.refresh_field("items");
+						frm.schedule_dialog.hide();
+					},
+				});
+			},
+		});
+
+		frm.schedule_dialog.show();
+
+		if (data?.length) {
+			data.forEach((d) => {
+				if (d.delivery_date && d.qty) {
+					frm.schedule_dialog.fields_dict.delivery_schedule.df.data.push({
+						delivery_date: d.delivery_date,
+						qty: d.qty,
+						name: d.name,
+					});
+				}
+			});
+
+			frm.schedule_dialog.fields_dict.delivery_schedule.refresh();
+		}
+	},
+
+	add_delivery_schedule(frm, row, must_be_whole_number) {
+		let first_delivery_date = frm.schedule_dialog.get_value("delivery_date");
+		let frequency = frm.schedule_dialog.get_value("frequency");
+		let no_of_deliveries = cint(frm.schedule_dialog.get_value("no_of_deliveries"));
+
+		if (!frequency) {
+			frappe.throw(__("Please select a frequency for delivery schedule"));
+		}
+
+		if (!first_delivery_date) {
+			frappe.throw(__("Please enter the first delivery date"));
+		}
+
+		if (no_of_deliveries <= 0) {
+			frappe.throw(__("Please enter a valid number of deliveries"));
+		}
+
+		frm.schedule_dialog.fields_dict.delivery_schedule.df.data = [];
+		let qty_to_deliver = row.qty;
+		let qty_per_delivery = qty_to_deliver / no_of_deliveries;
+		for (let i = 0; i < no_of_deliveries; i++) {
+			let qty = qty_per_delivery;
+			if (must_be_whole_number) {
+				qty = cint(qty);
+			}
+
+			if (i === no_of_deliveries - 1) {
+				// Last delivery, adjust the quantity to deliver the remaining amount
+				qty = qty_to_deliver;
+				qty_to_deliver = 0;
+			} else {
+				qty_to_deliver -= qty;
+			}
+
+			frm.schedule_dialog.fields_dict.delivery_schedule.df.data.push({
+				delivery_date: first_delivery_date,
+				qty: qty,
+			});
+
+			if (frequency === "Weekly") {
+				first_delivery_date = frappe.datetime.add_days(first_delivery_date, i + 1 * 7);
+			} else {
+				let month_mapper = {
+					Monthly: 1,
+					Quarterly: 3,
+					Half_Yearly: 6,
+					Yearly: 12,
+				};
+
+				first_delivery_date = frappe.datetime.add_months(
+					first_delivery_date,
+					month_mapper[frequency] * i + 1
+				);
+			}
+		}
+
+		frm.schedule_dialog.fields_dict.delivery_schedule.refresh();
+	},
+
+	set_delivery_schedule(frm, row, data) {
+		data.forEach((d) => {
+			if (d.delivery_date && d.qty) {
+				frm.schedule_dialog.fields_dict.delivery_schedule.df.data.push({
+					delivery_date: d.delivery_date,
+					qty: d.qty,
+				});
+			}
+		});
+
+		frm.schedule_dialog.fields_dict.delivery_schedule.refresh();
+	},
+
+	get_subcontracting_boms_for_finished_goods: function (fg_item) {
+		return frappe.call({
+			method: "erpnext.subcontracting.doctype.subcontracting_bom.subcontracting_bom.get_subcontracting_boms_for_finished_goods",
+			args: {
+				fg_items: fg_item,
+			},
+		});
+	},
+
+	get_subcontracting_boms_for_service_item: function (service_item) {
+		return frappe.call({
+			method: "erpnext.subcontracting.doctype.subcontracting_bom.subcontracting_bom.get_subcontracting_boms_for_service_item",
+			args: {
+				service_item: service_item,
+			},
+		});
+	},
 });
 
 frappe.ui.form.on("Sales Order Item", {
-	item_code: function (frm, cdt, cdn) {
+	item_code: async function (frm, cdt, cdn) {
 		var row = locals[cdt][cdn];
 		if (frm.doc.delivery_date) {
 			row.delivery_date = frm.doc.delivery_date;
@@ -561,10 +794,114 @@ frappe.ui.form.on("Sales Order Item", {
 		} else {
 			frm.script_manager.copy_from_first_row("items", row, ["delivery_date"]);
 		}
+
+		if (frm.doc.is_subcontracted) {
+			if (row.item_code && !row.fg_item) {
+				var result = await frm.events.get_subcontracting_boms_for_service_item(row.item_code);
+
+				if (result.message && Object.keys(result.message).length) {
+					var finished_goods = Object.keys(result.message);
+
+					// Set FG if only one active Subcontracting BOM is found
+					if (finished_goods.length === 1) {
+						row.fg_item = result.message[finished_goods[0]].finished_good;
+						row.uom = result.message[finished_goods[0]].finished_good_uom;
+						refresh_field("items");
+					} else {
+						const dialog = new frappe.ui.Dialog({
+							title: __("Select Finished Good"),
+							size: "small",
+							fields: [
+								{
+									fieldname: "finished_good",
+									fieldtype: "Autocomplete",
+									label: __("Finished Good"),
+									options: finished_goods,
+								},
+							],
+							primary_action_label: __("Select"),
+							primary_action: () => {
+								var subcontracting_bom = result.message[dialog.get_value("finished_good")];
+
+								if (subcontracting_bom) {
+									row.fg_item = subcontracting_bom.finished_good;
+									row.uom = subcontracting_bom.finished_good_uom;
+									refresh_field("items");
+								}
+
+								dialog.hide();
+							},
+						});
+
+						dialog.show();
+					}
+				}
+			}
+		}
 	},
+
 	delivery_date: function (frm, cdt, cdn) {
 		if (!frm.doc.delivery_date) {
 			erpnext.utils.copy_value_in_all_rows(frm.doc, cdt, cdn, "items", "delivery_date");
+		}
+	},
+
+	add_schedule(frm, cdt, cdn) {
+		let row = locals[cdt][cdn];
+
+		frappe.call({
+			method: "get_delivery_schedule",
+			doc: frm.doc,
+			args: {
+				sales_order_item: row.name,
+			},
+			callback: function (r) {
+				frm.events.prepare_delivery_schedule(frm, row, r.message);
+			},
+		});
+	},
+
+	fg_item: async function (frm, cdt, cdn) {
+		if (frm.doc.is_subcontracted) {
+			var row = locals[cdt][cdn];
+
+			if (row.fg_item) {
+				var result = await frm.events.get_subcontracting_boms_for_finished_goods(row.fg_item);
+
+				if (result.message && Object.keys(result.message).length) {
+					frappe.model.set_value(cdt, cdn, "item_code", result.message.service_item);
+					frappe.model.set_value(
+						cdt,
+						cdn,
+						"qty",
+						flt(row.fg_item_qty) * flt(result.message.conversion_factor)
+					);
+					frappe.model.set_value(cdt, cdn, "uom", result.message.service_item_uom);
+				}
+			}
+		}
+	},
+
+	qty: async function (frm, cdt, cdn) {
+		if (frm.doc.is_subcontracted) {
+			var row = locals[cdt][cdn];
+
+			if (row.fg_item) {
+				var result = await frm.events.get_subcontracting_boms_for_finished_goods(row.fg_item);
+
+				if (
+					result.message &&
+					row.item_code == result.message.service_item &&
+					row.uom == result.message.service_item_uom
+				) {
+					frappe.model.set_value(
+						cdt,
+						cdn,
+						"fg_item_qty",
+						flt(row.qty) / flt(result.message.conversion_factor)
+					);
+				}
+			}
 		}
 	},
 });
@@ -580,6 +917,22 @@ erpnext.selling.SalesOrderController = class SalesOrderController extends erpnex
 		let allow_delivery = false;
 
 		if (doc.docstatus == 1) {
+			if (
+				!["Closed", "Completed"].includes(doc.status) &&
+				flt(doc.per_delivered) < 100 &&
+				flt(doc.per_billed) < 100
+			) {
+				if (!doc.__onload || doc.__onload.can_update_items) {
+					this.frm.add_custom_button(__("Update Items"), () => {
+						erpnext.utils.update_child_items({
+							frm: this.frm,
+							child_docname: "items",
+							child_doctype: "Sales Order Detail",
+							cannot_add_row: false,
+						});
+					});
+				}
+			}
 			if (this.frm.has_perm("submit")) {
 				if (doc.status === "On Hold") {
 					// un-hold
@@ -591,7 +944,7 @@ erpnext.selling.SalesOrderController = class SalesOrderController extends erpnex
 						__("Status")
 					);
 
-					if (flt(doc.per_delivered, 2) < 100 || flt(doc.per_billed, 2) < 100) {
+					if (flt(doc.per_delivered) < 100 || flt(doc.per_billed) < 100) {
 						// close
 						this.frm.add_custom_button(__("Close"), () => this.close_sales_order(), __("Status"));
 					}
@@ -608,13 +961,15 @@ erpnext.selling.SalesOrderController = class SalesOrderController extends erpnex
 			}
 			if (doc.status !== "Closed") {
 				if (doc.status !== "On Hold") {
+					const items_are_deliverable = this.frm.doc.items.some(
+						(item) => item.delivered_by_supplier === 0 && item.qty > flt(item.delivered_qty)
+					);
 					allow_delivery =
-						this.frm.doc.items.some(
-							(item) => item.delivered_by_supplier === 0 && item.qty > flt(item.delivered_qty)
-						) && !this.frm.doc.skip_delivery_note;
+						(this.frm.doc.has_unit_price_items || items_are_deliverable) &&
+						!this.frm.doc.skip_delivery_note;
 
 					if (this.frm.has_perm("submit")) {
-						if (flt(doc.per_delivered, 2) < 100 || flt(doc.per_billed, 2) < 100) {
+						if (flt(doc.per_delivered) < 100 || flt(doc.per_billed) < 100) {
 							// hold
 							this.frm.add_custom_button(
 								__("Hold"),
@@ -630,15 +985,30 @@ erpnext.selling.SalesOrderController = class SalesOrderController extends erpnex
 						}
 					}
 
-					if (!doc.__onload || !doc.__onload.has_reserved_stock) {
-						// Don't show the `Reserve` button if the Sales Order has Picked Items.
-						if (flt(doc.per_picked, 2) < 100 && flt(doc.per_delivered, 2) < 100) {
+					if (doc.is_subcontracted) {
+						if (!doc.items.every((item) => item.qty == item.subcontracted_qty)) {
 							this.frm.add_custom_button(
-								__("Pick List"),
-								() => this.create_pick_list(),
+								__("Subcontracting Inward Order"),
+								() => {
+									me.make_subcontracting_inward_order();
+								},
 								__("Create")
 							);
 						}
+					}
+
+					if (
+						(!doc.__onload || !doc.__onload.has_reserved_stock) &&
+						flt(doc.per_picked) < 100 &&
+						flt(doc.per_delivered) < 100 &&
+						frappe.model.can_create("Pick List") &&
+						!doc.is_subcontracted
+					) {
+						this.frm.add_custom_button(
+							__("Pick List"),
+							() => this.create_pick_list(),
+							__("Create")
+						);
 					}
 
 					const order_is_a_sale = ["Sales", "Shopping Cart"].indexOf(doc.order_type) !== -1;
@@ -649,24 +1019,32 @@ erpnext.selling.SalesOrderController = class SalesOrderController extends erpnex
 
 					// delivery note
 					if (
-						flt(doc.per_delivered, 2) < 100 &&
+						flt(doc.per_delivered) < 100 &&
 						(order_is_a_sale || order_is_a_custom_sale) &&
 						allow_delivery
 					) {
-						this.frm.add_custom_button(
-							__("Delivery Note"),
-							() => this.make_delivery_note_based_on_delivery_date(true),
-							__("Create")
-						);
-						this.frm.add_custom_button(
-							__("Work Order"),
-							() => this.make_work_order(),
-							__("Create")
-						);
+						if (frappe.model.can_create("Delivery Note")) {
+							this.frm.add_custom_button(
+								__("Delivery Note"),
+								() => this.make_delivery_note_based_on_delivery_date(true),
+								__("Create")
+							);
+						}
+
+						if (frappe.model.can_create("Work Order") && !doc.is_subcontracted) {
+							this.frm.add_custom_button(
+								__("Work Order"),
+								() => this.make_work_order(),
+								__("Create")
+							);
+						}
 					}
 
 					// sales invoice
-					if (flt(doc.per_billed, 2) < 100) {
+					if (
+						(flt(doc.per_billed) < 100 && frappe.model.can_create("Sales Invoice")) ||
+						doc.is_subcontracted
+					) {
 						this.frm.add_custom_button(
 							__("Sales Invoice"),
 							() => me.make_sales_invoice(),
@@ -676,14 +1054,18 @@ erpnext.selling.SalesOrderController = class SalesOrderController extends erpnex
 
 					// material request
 					if (
-						!doc.order_type ||
-						((order_is_a_sale || order_is_a_custom_sale) && flt(doc.per_delivered, 2) < 100)
+						(!doc.order_type ||
+							((order_is_a_sale || order_is_a_custom_sale) && flt(doc.per_delivered) < 100)) &&
+						frappe.model.can_create("Material Request") &&
+						!doc.is_subcontracted
 					) {
-						this.frm.add_custom_button(
-							__("Material Request"),
-							() => this.make_material_request(),
-							__("Create")
-						);
+						if (!doc.is_subcontracted) {
+							this.frm.add_custom_button(
+								__("Material Request"),
+								() => this.make_material_request(),
+								__("Create")
+							);
+						}
 						this.frm.add_custom_button(
 							__("Request for Raw Materials"),
 							() => this.make_raw_material_request(),
@@ -692,7 +1074,11 @@ erpnext.selling.SalesOrderController = class SalesOrderController extends erpnex
 					}
 
 					// Make Purchase Order
-					if (!this.frm.doc.is_internal_customer) {
+					if (
+						!this.frm.doc.is_internal_customer &&
+						frappe.model.can_create("Purchase Order") &&
+						!doc.is_subcontracted
+					) {
 						this.frm.add_custom_button(
 							__("Purchase Order"),
 							() => this.make_purchase_order(),
@@ -701,32 +1087,40 @@ erpnext.selling.SalesOrderController = class SalesOrderController extends erpnex
 					}
 
 					// maintenance
-					if (flt(doc.per_delivered, 2) < 100 && (order_is_maintenance || order_is_a_custom_sale)) {
-						this.frm.add_custom_button(
-							__("Maintenance Visit"),
-							() => this.make_maintenance_visit(),
-							__("Create")
-						);
-						this.frm.add_custom_button(
-							__("Maintenance Schedule"),
-							() => this.make_maintenance_schedule(),
-							__("Create")
-						);
+					if (flt(doc.per_delivered) < 100 && (order_is_maintenance || order_is_a_custom_sale)) {
+						if (frappe.model.can_create("Maintenance Visit")) {
+							this.frm.add_custom_button(
+								__("Maintenance Visit"),
+								() => this.make_maintenance_visit(),
+								__("Create")
+							);
+						}
+						if (frappe.model.can_create("Maintenance Schedule")) {
+							this.frm.add_custom_button(
+								__("Maintenance Schedule"),
+								() => this.make_maintenance_schedule(),
+								__("Create")
+							);
+						}
 					}
 
 					// project
-					if (flt(doc.per_delivered, 2) < 100) {
+					if (flt(doc.per_delivered) < 100 && frappe.model.can_create("Project")) {
 						this.frm.add_custom_button(__("Project"), () => this.make_project(), __("Create"));
 					}
 
-					if (doc.docstatus === 1 && !doc.inter_company_order_reference) {
+					if (
+						doc.docstatus === 1 &&
+						!doc.inter_company_order_reference &&
+						frappe.model.can_create("Purchase Order")
+					) {
 						let me = this;
 						let internal = me.frm.doc.is_internal_customer;
 						if (internal) {
 							let button_label =
 								me.frm.doc.company === me.frm.doc.represents_company
-									? "Internal Purchase Order"
-									: "Inter Company Purchase Order";
+									? __("Internal Purchase Order")
+									: __("Inter Company Purchase Order");
 
 							me.frm.add_custom_button(
 								button_label,
@@ -739,22 +1133,30 @@ erpnext.selling.SalesOrderController = class SalesOrderController extends erpnex
 					}
 				}
 				// payment request
-				if (
-					flt(doc.per_billed, precision("per_billed", doc)) <
-					100 + frappe.boot.sysdefaults.over_billing_allowance
-				) {
+				if (flt(doc.per_billed) < 100 + frappe.boot.sysdefaults.over_billing_allowance) {
 					this.frm.add_custom_button(
 						__("Payment Request"),
 						() => this.make_payment_request(),
 						__("Create")
 					);
-					this.frm.add_custom_button(__("Payment"), () => this.make_payment_entry(), __("Create"));
+
+					if (frappe.model.can_create("Payment Entry")) {
+						this.frm.add_custom_button(
+							__("Payment"),
+							() => this.make_payment_entry(),
+							__("Create")
+						);
+					}
 				}
 				this.frm.page.set_inner_btn_group_as_primary(__("Create"));
 			}
 		}
 
-		if (this.frm.doc.docstatus === 0) {
+		if (
+			this.frm.doc.docstatus === 0 &&
+			frappe.model.can_read("Quotation") &&
+			!this.frm.doc.is_subcontracted
+		) {
 			this.frm.add_custom_button(
 				__("Quotation"),
 				function () {
@@ -764,7 +1166,7 @@ erpnext.selling.SalesOrderController = class SalesOrderController extends erpnex
 						target: me.frm,
 						setters: [
 							{
-								label: "Customer",
+								label: __("Customer"),
 								fieldname: "party_name",
 								fieldtype: "Link",
 								options: "Customer",
@@ -774,8 +1176,11 @@ erpnext.selling.SalesOrderController = class SalesOrderController extends erpnex
 						get_query_filters: {
 							company: me.frm.doc.company,
 							docstatus: 1,
-							status: ["!=", "Lost"],
+							status: ["not in", ["Lost", "Ordered"]],
 						},
+						allow_child_item_selection: true,
+						child_fieldname: "items",
+						child_columns: ["item_code", "item_name", "qty", "rate", "amount"],
 					});
 				},
 				__("Get Items From")
@@ -811,7 +1216,7 @@ erpnext.selling.SalesOrderController = class SalesOrderController extends erpnex
 				} else {
 					const fields = [
 						{
-							label: "Items",
+							label: __("Items"),
 							fieldtype: "Table",
 							fieldname: "items",
 							description: __("Select BOM and Qty for Production"),
@@ -820,6 +1225,12 @@ erpnext.selling.SalesOrderController = class SalesOrderController extends erpnex
 									fieldtype: "Read Only",
 									fieldname: "item_code",
 									label: __("Item Code"),
+									in_list_view: 1,
+								},
+								{
+									fieldtype: "Read Only",
+									fieldname: "item_name",
+									label: __("Item Name"),
 									in_list_view: 1,
 								},
 								{
@@ -859,6 +1270,9 @@ erpnext.selling.SalesOrderController = class SalesOrderController extends erpnex
 						fields: fields,
 						primary_action: function () {
 							var data = { items: d.fields_dict.items.grid.get_selected_children() };
+							if (!data.items.length) {
+								frappe.throw(__("Please select atleast one item to continue"));
+							}
 							me.frm.call({
 								method: "make_work_orders",
 								args: {
@@ -1007,7 +1421,7 @@ erpnext.selling.SalesOrderController = class SalesOrderController extends erpnex
 						items: data,
 						company: me.frm.doc.company,
 						sales_order: me.frm.docname,
-						project: me.frm.project,
+						project: me.frm.doc.project,
 					},
 					freeze: true,
 					callback: function (r) {
@@ -1169,7 +1583,7 @@ erpnext.selling.SalesOrderController = class SalesOrderController extends erpnex
 				{
 					fieldname: "items_for_po",
 					fieldtype: "Table",
-					label: "Select Items",
+					label: __("Select Items"),
 					fields: [
 						{
 							fieldtype: "Data",
@@ -1197,6 +1611,7 @@ erpnext.selling.SalesOrderController = class SalesOrderController extends erpnex
 							read_only: 1,
 							fieldname: "uom",
 							label: __("UOM"),
+							options: "UOM",
 							in_list_view: 1,
 						},
 						{
@@ -1209,7 +1624,7 @@ erpnext.selling.SalesOrderController = class SalesOrderController extends erpnex
 					],
 				},
 			],
-			primary_action_label: "Create Purchase Order",
+			primary_action_label: __("Create Purchase Order"),
 			primary_action(args) {
 				if (!args) return;
 
@@ -1270,7 +1685,6 @@ erpnext.selling.SalesOrderController = class SalesOrderController extends erpnex
 					let pending_qty = (flt(d.stock_qty) - ordered_qty) / flt(d.conversion_factor);
 					if (pending_qty > 0) {
 						po_items.push({
-							doctype: "Sales Order Item",
 							name: d.name,
 							item_name: d.item_name,
 							item_code: d.item_code,
@@ -1355,6 +1769,14 @@ erpnext.selling.SalesOrderController = class SalesOrderController extends erpnex
 			always: function () {
 				frappe.ui.form.is_saving = false;
 			},
+		});
+	}
+
+	make_subcontracting_inward_order() {
+		frappe.model.open_mapped_doc({
+			method: "erpnext.selling.doctype.sales_order.sales_order.make_subcontracting_inward_order",
+			frm: this.frm,
+			freeze_message: __("Creating Subcontracting Inward Order ..."),
 		});
 	}
 };

@@ -38,6 +38,7 @@
   "column_break_30",
   "discount_percentage",
   "discount_amount",
+  "distributed_discount_amount",
   "base_rate_with_margin",
   "sec_break2",
   "rate",
@@ -57,6 +58,7 @@
   "base_net_rate",
   "base_net_amount",
   "valuation_rate",
+  "sales_incoming_rate",
   "item_tax_amount",
   "landed_cost_voucher_amount",
   "rm_supp_cost",
@@ -105,6 +107,8 @@
   "purchase_receipt",
   "pr_detail",
   "sales_invoice_item",
+  "material_request",
+  "material_request_item",
   "item_weight_details",
   "weight_per_unit",
   "total_weight",
@@ -458,7 +462,8 @@
    "depends_on": "eval:!doc.is_fixed_asset && doc.use_serial_batch_fields === 1 && parent.update_stock === 1",
    "fieldname": "serial_no",
    "fieldtype": "Text",
-   "label": "Serial No"
+   "label": "Serial No",
+   "no_copy": 1
   },
   {
    "depends_on": "eval:!doc.is_fixed_asset && doc.use_serial_batch_fields === 1 && parent.update_stock === 1",
@@ -502,7 +507,8 @@
    "fieldtype": "Link",
    "label": "Project",
    "options": "Project",
-   "print_hide": 1
+   "print_hide": 1,
+   "search_index": 1
   },
   {
    "allow_on_submit": 1,
@@ -835,7 +841,7 @@
   },
   {
    "collapsible": 1,
-   "collapsible_depends_on": "eval: doc.margin_type || doc.discount_amount",
+   "collapsible_depends_on": "eval: doc.margin_type || doc.discount_amount || doc.distributed_discount_amount",
    "fieldname": "section_break_26",
    "fieldtype": "Section Break",
    "label": "Discount and Margin"
@@ -906,7 +912,8 @@
    "label": "Rejected Serial and Batch Bundle",
    "no_copy": 1,
    "options": "Serial and Batch Bundle",
-   "print_hide": 1
+   "print_hide": 1,
+   "search_index": 1
   },
   {
    "fieldname": "wip_composite_asset",
@@ -934,18 +941,58 @@
   {
    "fieldname": "column_break_vbbb",
    "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "material_request",
+   "fieldtype": "Link",
+   "label": "Material Request",
+   "no_copy": 1,
+   "options": "Material Request",
+   "print_hide": 1,
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "material_request_item",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Material Request Item",
+   "no_copy": 1,
+   "oldfieldname": "pr_detail",
+   "oldfieldtype": "Data",
+   "print_hide": 1,
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "description": "Valuation rate for the item as per Sales Invoice (Only for Internal Transfers)",
+   "fieldname": "sales_incoming_rate",
+   "fieldtype": "Currency",
+   "hidden": 1,
+   "label": "Sales Incoming Rate",
+   "no_copy": 1,
+   "options": "Company:company:default_currency",
+   "print_hide": 1
+  },
+  {
+   "fieldname": "distributed_discount_amount",
+   "fieldtype": "Currency",
+   "label": "Distributed Discount Amount",
+   "options": "currency"
   }
  ],
+ "grid_page_length": 50,
  "idx": 1,
  "istable": 1,
  "links": [],
- "modified": "2024-03-27 13:10:24.204495",
+ "modified": "2025-10-14 13:00:54.441511",
  "modified_by": "Administrator",
  "module": "Accounts",
  "name": "Purchase Invoice Item",
  "naming_rule": "Random",
  "owner": "Administrator",
  "permissions": [],
+ "row_format": "Dynamic",
  "sort_field": "creation",
  "sort_order": "DESC",
  "states": []

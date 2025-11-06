@@ -6,7 +6,7 @@ import frappe
 from frappe import _, msgprint
 from frappe.model.document import Document
 from frappe.query_builder.custom import ConstantColumn
-from frappe.utils import flt, fmt_money, getdate
+from frappe.utils import cint, flt, fmt_money, get_link_to_form, getdate
 from pypika import Order
 
 import erpnext
@@ -48,6 +48,7 @@ class BankClearance(Document):
 		entries = []
 
 		# get entries from all the apps
+		precision = cint(frappe.db.get_default("currency_precision")) or 2
 		for method_name in frappe.get_hooks("get_payment_entries_for_bank_clearance"):
 			entries += (
 				frappe.get_attr(method_name)(
@@ -77,7 +78,7 @@ class BankClearance(Document):
 			if not d.get("account_currency"):
 				d.account_currency = default_currency
 
-			formatted_amount = fmt_money(abs(amount), 2, d.account_currency)
+			formatted_amount = fmt_money(abs(amount), precision, d.account_currency)
 			d.amount = formatted_amount + " " + (_("Dr") if amount > 0 else _("Cr"))
 			d.posting_date = getdate(d.posting_date)
 
@@ -88,33 +89,64 @@ class BankClearance(Document):
 
 	@frappe.whitelist()
 	def update_clearance_date(self):
-		clearance_date_updated = False
+		invalid_document = []
+		invalid_cheque_date = []
+		entries_to_update = []
+
+		def validate_entry(d):
+			is_valid = True
+			if not d.payment_document:
+				invalid_document.append(str(d.idx))
+				is_valid = False
+
+			if d.clearance_date and d.cheque_date and getdate(d.clearance_date) < getdate(d.cheque_date):
+				invalid_cheque_date.append(str(d.idx))
+				is_valid = False
+
+			return is_valid
+
 		for d in self.get("payment_entries"):
-			if d.clearance_date:
-				if not d.payment_document:
-					frappe.throw(_("Row #{0}: Payment document is required to complete the transaction"))
-
-				if d.cheque_date and getdate(d.clearance_date) < getdate(d.cheque_date):
-					frappe.throw(
-						_("Row #{0}: Clearance date {1} cannot be before Cheque Date {2}").format(
-							d.idx, d.clearance_date, d.cheque_date
-						)
-					)
-
-			if d.clearance_date or self.include_reconciled_entries:
+			if validate_entry(d) and (d.clearance_date or self.include_reconciled_entries):
 				if not d.clearance_date:
 					d.clearance_date = None
 
-				payment_entry = frappe.get_doc(d.payment_document, d.payment_entry)
+				entries_to_update.append(d)
+
+		if invalid_document or invalid_cheque_date:
+			msg = _("<p>Please correct the following row(s):</p><ul>")
+			if invalid_document:
+				msg += _("<li>Payment document required for row(s): {0}</li>").format(
+					", ".join(invalid_document)
+				)
+
+			if invalid_cheque_date:
+				msg += _("<li>Clearance date must be after cheque date for row(s): {0}</li>").format(
+					", ".join(invalid_cheque_date)
+				)
+
+			msg += "</ul>"
+			frappe.throw(_(msg))
+			return
+
+		if not entries_to_update:
+			msgprint(_("Clearance Date not mentioned"))
+			return
+
+		for d in entries_to_update:
+			if d.payment_document == "Sales Invoice":
+				frappe.db.set_value(
+					"Sales Invoice Payment",
+					{"parent": d.payment_entry, "account": self.get("account"), "amount": [">", 0]},
+					"clearance_date",
+					d.clearance_date,
+				)
+			else:
+				# using db_set to trigger notification
+				payment_entry = frappe.get_lazy_doc(d.payment_document, d.payment_entry)
 				payment_entry.db_set("clearance_date", d.clearance_date)
 
-				clearance_date_updated = True
-
-		if clearance_date_updated:
-			self.get_payment_entries()
-			msgprint(_("Clearance Date updated"))
-		else:
-			msgprint(_("Clearance Date not mentioned"))
+		self.get_payment_entries()
+		msgprint(_("Clearance Date updated"))
 
 
 def get_payment_entries_for_bank_clearance(
@@ -123,8 +155,10 @@ def get_payment_entries_for_bank_clearance(
 	entries = []
 
 	condition = ""
+	pe_condition = ""
 	if not include_reconciled_entries:
 		condition = "and (clearance_date IS NULL or clearance_date='0000-00-00')"
+		pe_condition = "and (pe.clearance_date IS NULL or pe.clearance_date='0000-00-00')"
 
 	journal_entries = frappe.db.sql(
 		f"""
@@ -146,31 +180,28 @@ def get_payment_entries_for_bank_clearance(
 		as_dict=1,
 	)
 
-	if bank_account:
-		condition += "and bank_account = %(bank_account)s"
-
 	payment_entries = frappe.db.sql(
 		f"""
 			select
-				"Payment Entry" as payment_document, name as payment_entry,
-				reference_no as cheque_number, reference_date as cheque_date,
-				if(paid_from=%(account)s, paid_amount + total_taxes_and_charges, 0) as credit,
-				if(paid_from=%(account)s, 0, received_amount) as debit,
-				posting_date, ifnull(party,if(paid_from=%(account)s,paid_to,paid_from)) as against_account, clearance_date,
-				if(paid_to=%(account)s, paid_to_account_currency, paid_from_account_currency) as account_currency
-			from `tabPayment Entry`
+				"Payment Entry" as payment_document, pe.name as payment_entry,
+				pe.reference_no as cheque_number, pe.reference_date as cheque_date,
+				if(pe.paid_from=%(account)s, pe.paid_amount + if(pe.payment_type = 'Pay' and c.default_currency = pe.paid_from_account_currency, pe.base_total_taxes_and_charges, pe.total_taxes_and_charges) , 0) as credit,
+				if(pe.paid_from=%(account)s, 0, pe.received_amount + pe.total_taxes_and_charges) as debit,
+				pe.posting_date, ifnull(pe.party,if(pe.paid_from=%(account)s,pe.paid_to,pe.paid_from)) as against_account, pe.clearance_date,
+				if(pe.paid_to=%(account)s, pe.paid_to_account_currency, pe.paid_from_account_currency) as account_currency
+			from `tabPayment Entry` as pe
+			join `tabCompany` c on c.name = pe.company
 			where
-				(paid_from=%(account)s or paid_to=%(account)s) and docstatus=1
-				and posting_date >= %(from)s and posting_date <= %(to)s
-				{condition}
+				(pe.paid_from=%(account)s or pe.paid_to=%(account)s) and pe.docstatus=1
+				and pe.posting_date >= %(from)s and pe.posting_date <= %(to)s
+				{pe_condition}
 			order by
-				posting_date ASC, name DESC
+				pe.posting_date ASC, pe.name DESC
 		""",
 		{
 			"account": account,
 			"from": from_date,
 			"to": to_date,
-			"bank_account": bank_account,
 		},
 		as_dict=1,
 	)

@@ -1,5 +1,6 @@
 {
  "actions": [],
+ "allow_rename": 1,
  "autoname": "field:license_plate",
  "creation": "2016-09-03 03:33:27.680331",
  "doctype": "DocType",
@@ -11,6 +12,7 @@
   "make",
   "column_break_3",
   "model",
+  "company",
   "vehicle_details",
   "last_odometer",
   "acquisition_date",
@@ -47,7 +49,7 @@
   {
    "fieldname": "make",
    "fieldtype": "Data",
-   "label": "Manufacturer",
+   "label": "Make",
    "reqd": 1
   },
   {
@@ -192,13 +194,21 @@
    "options": "Vehicle",
    "print_hide": 1,
    "read_only": 1
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Company",
+   "options": "Company"
   }
  ],
  "links": [],
- "modified": "2024-03-27 13:10:58.133410",
+ "modified": "2025-01-24 06:22:33.129805",
  "modified_by": "Administrator",
  "module": "Setup",
  "name": "Vehicle",
+ "naming_rule": "By fieldname",
  "owner": "Administrator",
  "permissions": [
   {
@@ -232,7 +242,7 @@
  ],
  "quick_entry": 1,
  "search_fields": "license_plate,location,model",
- "sort_field": "creation",
+ "sort_field": "modified",
  "sort_order": "DESC",
  "states": [],
  "track_changes": 1

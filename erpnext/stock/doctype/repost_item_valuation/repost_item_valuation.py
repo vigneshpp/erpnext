@@ -47,6 +47,7 @@ class RepostItemValuation(Document):
 		items_to_be_repost: DF.Code | None
 		posting_date: DF.Date
 		posting_time: DF.Time | None
+		recreate_stock_ledgers: DF.Check
 		reposting_data_file: DF.Attach | None
 		status: DF.Literal["Queued", "In Progress", "Completed", "Skipped", "Failed"]
 		total_reposting_count: DF.Int
@@ -69,15 +70,37 @@ class RepostItemValuation(Document):
 		)
 
 	def validate(self):
+		self.set_company()
 		self.validate_period_closing_voucher()
 		self.set_status(write=False)
 		self.reset_field_values()
-		self.set_company()
 		self.validate_accounts_freeze()
+		self.reset_recreate_stock_ledgers()
+		self.validate_recreate_stock_ledgers()
+
+	def validate_recreate_stock_ledgers(self):
+		if not self.recreate_stock_ledgers:
+			return
+
+		items = []
+		if self.based_on == "Item and Warehouse":
+			items.append(self.item_code)
+		else:
+			items = get_items_to_be_repost(self.voucher_type, self.voucher_no)
+			items = list(set([d.item_code for d in items]))
+
+		if serial_batch_items := frappe.get_all(
+			"Item", or_filters={"has_serial_no": 1, "has_batch_no": 1}, filters={"name": ("in", items)}
+		):
+			item_list = ", ".join([d.name for d in serial_batch_items])
+			msg = _(
+				"Since {0} are Serial No/Batch No items, you cannot enable 'Recreate Stock Ledgers' in Repost Item Valuation."
+			).format(item_list)
+			frappe.throw(msg)
 
 	def validate_period_closing_voucher(self):
 		# Period Closing Voucher
-		year_end_date = self.get_max_year_end_date(self.company)
+		year_end_date = self.get_max_period_closing_date(self.company)
 		if year_end_date and getdate(self.posting_date) <= getdate(year_end_date):
 			date = frappe.format(year_end_date, "Date")
 			msg = f"Due to period closing, you cannot repost item valuation before {date}"
@@ -97,47 +120,43 @@ class RepostItemValuation(Document):
 				]
 			)
 
-		# Closing Stock Balance
+		# Stock Closing Balance
 		closing_stock = self.get_closing_stock_balance()
 		if closing_stock and closing_stock[0].name:
-			name = get_link_to_form("Closing Stock Balance", closing_stock[0].name)
-			to_date = frappe.format(closing_stock[0].to_date, "Date")
-			msg = f"Due to closing stock balance {name}, you cannot repost item valuation before {to_date}"
-			frappe.throw(_(msg))
+			name = get_link_to_form("Stock Closing Entry", closing_stock[0].name)
+			to_date = frappe.format(closing_stock[0].posting_date, "Date")
+			frappe.throw(
+				_("Due to stock closing entry {0}, you cannot repost item valuation before {1}").format(
+					name, to_date
+				)
+			)
+
+	def reset_recreate_stock_ledgers(self):
+		if self.recreate_stock_ledgers and self.based_on != "Transaction":
+			self.recreate_stock_ledgers = 0
 
 	def get_closing_stock_balance(self):
 		filters = {
 			"company": self.company,
-			"status": "Completed",
-			"docstatus": 1,
 			"to_date": (">=", self.posting_date),
+			"status": "Completed",
 		}
 
-		for field in ["warehouse", "item_code"]:
-			if self.get(field):
-				filters.update({field: ("in", ["", self.get(field)])})
-
-		return frappe.get_all("Closing Stock Balance", fields=["name", "to_date"], filters=filters)
-
-	@staticmethod
-	def get_max_year_end_date(company):
-		data = frappe.get_all(
-			"Period Closing Voucher", fields=["fiscal_year"], filters={"docstatus": 1, "company": company}
+		return frappe.get_all(
+			"Stock Closing Entry", fields=["name", "to_date as posting_date"], filters=filters, limit=1
 		)
 
-		if not data:
-			return
-
-		fiscal_years = [d.fiscal_year for d in data]
-		table = frappe.qb.DocType("Fiscal Year")
+	@staticmethod
+	def get_max_period_closing_date(company):
+		table = frappe.qb.DocType("Period Closing Voucher")
 
 		query = (
 			frappe.qb.from_(table)
-			.select(Max(table.year_end_date))
-			.where((table.name.isin(fiscal_years)) & (table.disabled == 0))
+			.select(Max(table.period_end_date))
+			.where((table.company == company) & (table.docstatus == 1))
 		).run()
 
-		return query[0][0] if query else None
+		return query[0][0] if query and query[0][0] else None
 
 	def validate_accounts_freeze(self):
 		acc_settings = frappe.get_cached_doc("Accounts Settings")
@@ -164,6 +183,7 @@ class RepostItemValuation(Document):
 	def on_trash(self):
 		self.clear_attachment()
 
+	@frappe.whitelist()
 	def set_company(self):
 		if self.based_on == "Transaction":
 			self.company = frappe.get_cached_value(self.voucher_type, self.voucher_no, "company")
@@ -182,7 +202,7 @@ class RepostItemValuation(Document):
 	def clear_attachment(self):
 		if attachments := get_attachments(self.doctype, self.name):
 			attachment = attachments[0]
-			frappe.delete_doc("File", attachment.name)
+			frappe.delete_doc("File", attachment.name, ignore_permissions=True)
 
 		if self.reposting_data_file:
 			self.db_set("reposting_data_file", None)
@@ -197,7 +217,7 @@ class RepostItemValuation(Document):
 		        These flags are useful for asserting real time behaviour like quantity updates.
 		"""
 
-		if not frappe.flags.in_test:
+		if not frappe.in_test:
 			return
 		if self.flags.dont_run_in_test or frappe.flags.dont_execute_stock_reposts:
 			return
@@ -222,6 +242,7 @@ class RepostItemValuation(Document):
 		self.distinct_item_and_warehouse = None
 		self.items_to_be_repost = None
 		self.gl_reposting_index = 0
+		self.clear_attachment()
 		self.db_update()
 
 	def deduplicate_similar_repost(self):
@@ -252,6 +273,16 @@ class RepostItemValuation(Document):
 			filters,
 		)
 
+	def recreate_stock_ledger_entries(self):
+		"""Recreate Stock Ledger Entries for the transaction."""
+		if self.based_on == "Transaction" and self.recreate_stock_ledgers:
+			doc = frappe.get_doc(self.voucher_type, self.voucher_no)
+			doc.db_set("docstatus", 2)
+			doc.update_stock_ledger(allow_negative_stock=True)
+
+			doc.db_set("docstatus", 1)
+			doc.update_stock_ledger(allow_negative_stock=True)
+
 
 def on_doctype_update():
 	frappe.db.add_index("Repost Item Valuation", ["warehouse", "item_code"], "item_warehouse")
@@ -267,17 +298,21 @@ def repost(doc):
 		frappe.db.MAX_WRITES_PER_TRANSACTION *= 4
 
 		doc.set_status("In Progress")
-		if not frappe.flags.in_test:
+		if not frappe.in_test:
 			frappe.db.commit()
+
+		if doc.recreate_stock_ledgers:
+			doc.recreate_stock_ledger_entries()
 
 		repost_sl_entries(doc)
 		repost_gl_entries(doc)
 
 		doc.set_status("Completed")
+		doc.db_set("reposting_data_file", None)
 		remove_attached_file(doc.name)
 
 	except Exception as e:
-		if frappe.flags.in_test:
+		if frappe.in_test:
 			# Don't silently fail in tests,
 			# there is no reason for reposts to fail in CI
 			raise
@@ -290,6 +325,11 @@ def repost(doc):
 		if isinstance(message, dict):
 			message = message.get("message")
 
+		status = "Failed"
+		# If failed because of timeout, set status to In Progress
+		if traceback and ("timeout" in traceback.lower() or "Deadlock found" in traceback):
+			status = "In Progress"
+
 		if traceback:
 			message += "<br><br>" + "<b>Traceback:</b> <br>" + traceback
 
@@ -298,19 +338,20 @@ def repost(doc):
 			doc.name,
 			{
 				"error_log": message,
-				"status": "Failed",
+				"status": status,
 			},
 		)
 
-		outgoing_email_account = frappe.get_cached_value(
-			"Email Account", {"default_outgoing": 1, "enable_outgoing": 1}, "name"
-		)
+		if status == "Failed":
+			outgoing_email_account = frappe.get_cached_value(
+				"Email Account", {"default_outgoing": 1, "enable_outgoing": 1}, "name"
+			)
 
-		if outgoing_email_account and not isinstance(e, RecoverableErrors):
-			notify_error_to_stock_managers(doc, message)
-			doc.set_status("Failed")
+			if outgoing_email_account and not isinstance(e, RecoverableErrors):
+				notify_error_to_stock_managers(doc, message)
+				doc.set_status("Failed")
 	finally:
-		if not frappe.flags.in_test:
+		if not frappe.in_test:
 			frappe.db.commit()
 
 
@@ -318,7 +359,7 @@ def remove_attached_file(docname):
 	if file_name := frappe.db.get_value(
 		"File", {"attached_to_name": docname, "attached_to_doctype": "Repost Item Valuation"}, "name"
 	):
-		frappe.delete_doc("File", file_name, delete_permanently=True)
+		frappe.delete_doc("File", file_name, ignore_permissions=True, delete_permanently=True, force=True)
 
 
 def repost_sl_entries(doc):
@@ -371,7 +412,7 @@ def _get_directly_dependent_vouchers(doc):
 	warehouses = set()
 
 	if doc.based_on == "Transaction":
-		ref_doc = frappe.get_doc(doc.voucher_type, doc.voucher_no)
+		ref_doc = frappe.get_lazy_doc(doc.voucher_type, doc.voucher_no)
 		doc_items, doc_warehouses = ref_doc.get_items_and_warehouses()
 		items.update(doc_items)
 		warehouses.update(doc_warehouses)
@@ -482,4 +523,9 @@ def in_configured_timeslot(repost_settings=None, current_time=None):
 @frappe.whitelist()
 def execute_repost_item_valuation():
 	"""Execute repost item valuation via scheduler."""
-	frappe.get_doc("Scheduled Job Type", "repost_item_valuation.repost_entries").enqueue(force=True)
+	if name := frappe.db.get_value(
+		"Scheduled Job Type",
+		{"method": "erpnext.stock.doctype.repost_item_valuation.repost_item_valuation.repost_entries"},
+		"name",
+	):
+		frappe.get_doc("Scheduled Job Type", name).enqueue(force=True)

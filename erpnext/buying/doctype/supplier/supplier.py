@@ -32,6 +32,9 @@ class Supplier(TransactionBase):
 			AllowedToTransactWith,
 		)
 		from erpnext.accounts.doctype.party_account.party_account import PartyAccount
+		from erpnext.buying.doctype.customer_number_at_supplier.customer_number_at_supplier import (
+			CustomerNumberAtSupplier,
+		)
 		from erpnext.utilities.doctype.portal_user.portal_user import PortalUser
 
 		accounts: DF.Table[PartyAccount]
@@ -39,6 +42,7 @@ class Supplier(TransactionBase):
 		allow_purchase_invoice_creation_without_purchase_receipt: DF.Check
 		companies: DF.Table[AllowedToTransactWith]
 		country: DF.Link | None
+		customer_numbers: DF.Table[CustomerNumberAtSupplier]
 		default_bank_account: DF.Link | None
 		default_currency: DF.Link | None
 		default_price_list: DF.Link | None
@@ -65,7 +69,7 @@ class Supplier(TransactionBase):
 		supplier_name: DF.Data
 		supplier_primary_address: DF.Link | None
 		supplier_primary_contact: DF.Link | None
-		supplier_type: DF.Literal["Company", "Individual", "Proprietorship", "Partnership"]
+		supplier_type: DF.Literal["Company", "Individual", "Partnership"]
 		tax_category: DF.Link | None
 		tax_id: DF.Data | None
 		tax_withholding_category: DF.Link | None
@@ -97,7 +101,7 @@ class Supplier(TransactionBase):
 		elif supp_master_name == "Naming Series":
 			set_name_by_naming_series(self)
 		else:
-			self.name = set_name_from_naming_options(frappe.get_meta(self.doctype).autoname, self)
+			set_name_from_naming_options(frappe.get_meta(self.doctype).autoname, self)
 
 	def on_update(self):
 		self.create_primary_contact()
@@ -138,6 +142,7 @@ class Supplier(TransactionBase):
 		validate_party_accounts(self)
 		self.validate_internal_supplier()
 		self.add_role_for_user()
+		self.validate_currency_for_receivable_payable_and_advance_account()
 
 	@frappe.whitelist()
 	def get_supplier_group_details(self):

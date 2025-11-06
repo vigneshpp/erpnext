@@ -20,34 +20,43 @@ frappe.ui.form.on("Journal Entry", {
 			"Unreconcile Payment Entries",
 			"Bank Transaction",
 		];
+
+		frm.trigger("set_queries");
+	},
+
+	set_queries(frm) {
+		frm.set_query("periodic_entry_difference_account", function () {
+			return {
+				filters: {
+					is_group: 0,
+					company: frm.doc.company,
+				},
+			};
+		});
+
+		frm.set_query("stock_asset_account", function () {
+			return {
+				filters: {
+					is_group: 0,
+					account_type: "Stock",
+					company: frm.doc.company,
+				},
+			};
+		});
+	},
+
+	get_balance_for_periodic_accounting(frm) {
+		frm.call({
+			method: "get_balance_for_periodic_accounting",
+			doc: frm.doc,
+			callback: function (r) {
+				refresh_field("accounts");
+			},
+		});
 	},
 
 	refresh: function (frm) {
 		erpnext.toggle_naming_series();
-
-		if (frm.doc.repost_required && frm.doc.docstatus === 1) {
-			frm.set_intro(
-				__(
-					"Accounting entries for this Journal Entry need to be reposted. Please click on 'Repost' button to update."
-				)
-			);
-			frm.add_custom_button(__("Repost Accounting Entries"), () => {
-				frm.call({
-					doc: frm.doc,
-					method: "repost_accounting_entries",
-					freeze: true,
-					freeze_message: __("Reposting..."),
-					callback: (r) => {
-						if (!r.exc) {
-							frappe.msgprint(__("Accounting Entries are reposted."));
-							frm.refresh();
-						}
-					},
-				});
-			})
-				.removeClass("btn-default")
-				.addClass("btn-warning");
-		}
 
 		if (frm.doc.docstatus > 0) {
 			frm.add_custom_button(
@@ -59,7 +68,7 @@ frappe.ui.form.on("Journal Entry", {
 						to_date: moment(frm.doc.modified).format("YYYY-MM-DD"),
 						company: frm.doc.company,
 						finance_book: frm.doc.finance_book,
-						group_by: "",
+						categorize_by: "",
 						show_cancelled_entries: frm.doc.docstatus === 2,
 					};
 					frappe.set_route("query-report", "General Ledger");
@@ -187,6 +196,7 @@ frappe.ui.form.on("Journal Entry", {
 		});
 
 		erpnext.accounts.dimensions.update_dimension(frm, frm.doctype);
+		erpnext.utils.set_letter_head(frm);
 	},
 
 	voucher_type: function (frm) {
@@ -384,21 +394,23 @@ erpnext.accounts.JournalEntry = class JournalEntry extends frappe.ui.form.Contro
 
 	accounts_add(doc, cdt, cdn) {
 		var row = frappe.get_doc(cdt, cdn);
+		row.exchange_rate = 1;
 		$.each(doc.accounts, function (i, d) {
 			if (d.account && d.party && d.party_type) {
 				row.account = d.account;
 				row.party = d.party;
 				row.party_type = d.party_type;
+				row.exchange_rate = d.exchange_rate;
 			}
 		});
 
 		// set difference
 		if (doc.difference) {
 			if (doc.difference > 0) {
-				row.credit_in_account_currency = doc.difference;
+				row.credit_in_account_currency = doc.difference / row.exchange_rate;
 				row.credit = doc.difference;
 			} else {
-				row.debit_in_account_currency = -doc.difference;
+				row.debit_in_account_currency = -doc.difference / row.exchange_rate;
 				row.debit = -doc.difference;
 			}
 		}
@@ -450,12 +462,6 @@ frappe.ui.form.on("Journal Entry Account", {
 					party: d.party,
 				},
 			});
-		}
-	},
-	cost_center: function (frm, dt, dn) {
-		// Don't reset for Gain/Loss type journals, as it will make Debit and Credit values '0'
-		if (frm.doc.voucher_type != "Exchange Gain Or Loss") {
-			erpnext.journal_entry.set_account_details(frm, dt, dn);
 		}
 	},
 
@@ -704,11 +710,34 @@ $.extend(erpnext.journal_entry, {
 				callback: function (r) {
 					if (r.message) {
 						$.extend(d, r.message);
+						erpnext.journal_entry.set_amount_on_last_row(frm, dt, dn);
 						erpnext.journal_entry.set_debit_credit_in_company_currency(frm, dt, dn);
 						refresh_field("accounts");
 					}
 				},
 			});
 		}
+	},
+	set_amount_on_last_row: function (frm, dt, dn) {
+		let row = locals[dt][dn];
+		let length = frm.doc.accounts.length;
+		if (row.idx != length) return;
+
+		let difference = frm.doc.accounts.reduce((total, row) => {
+			if (row.idx == length) return total;
+
+			return total + row.debit - row.credit;
+		}, 0);
+
+		if (difference) {
+			if (difference > 0) {
+				row.credit_in_account_currency = difference / row.exchange_rate;
+				row.credit = difference;
+			} else {
+				row.debit_in_account_currency = -difference / row.exchange_rate;
+				row.debit = -difference;
+			}
+		}
+		refresh_field("accounts");
 	},
 });

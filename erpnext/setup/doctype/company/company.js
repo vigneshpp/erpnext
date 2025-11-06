@@ -12,18 +12,27 @@ frappe.ui.form.on("Company", {
 				}
 			});
 		}
-
-		frm.call("check_if_transactions_exist").then((r) => {
-			frm.toggle_enable("default_currency", !r.message);
-		});
+		if (!frm.doc.__islocal) {
+			frm.call("check_if_transactions_exist").then((r) => {
+				frm.toggle_enable("default_currency", !r.message);
+			});
+		}
+		if (frm.doc.__islocal) {
+			frm.set_value("reporting_currency", "");
+		}
 	},
 	setup: function (frm) {
 		frm.__rename_queue = "long";
-		erpnext.company.setup_queries(frm);
 
 		frm.set_query("parent_company", function () {
 			return {
 				filters: { is_group: 1 },
+			};
+		});
+
+		frm.set_query("default_operating_cost_account", function (doc) {
+			return {
+				filters: { company: doc.name, root_type: "Expense" },
 			};
 		});
 
@@ -74,6 +83,8 @@ frappe.ui.form.on("Company", {
 	},
 
 	refresh: function (frm) {
+		erpnext.company.setup_queries(frm);
+
 		frm.toggle_display("address_html", !frm.is_new());
 
 		if (!frm.is_new()) {
@@ -146,6 +157,10 @@ frappe.ui.form.on("Company", {
 					);
 				}
 			}
+		}
+
+		if (frm.doc.__islocal) {
+			frm.set_value("reporting_currency", "");
 		}
 
 		erpnext.company.set_chart_of_accounts_options(frm.doc);
@@ -244,6 +259,7 @@ erpnext.company.setup_queries = function (frm) {
 			["default_expense_account", { root_type: "Expense" }],
 			["default_income_account", { root_type: "Income" }],
 			["round_off_account", { root_type: "Expense" }],
+			["round_off_for_opening", { root_type: "Liability", account_type: "Round Off for Opening" }],
 			["write_off_account", { root_type: "Expense" }],
 			["default_deferred_expense_account", {}],
 			["default_deferred_revenue_account", {}],
@@ -251,7 +267,10 @@ erpnext.company.setup_queries = function (frm) {
 			["discount_allowed_account", { root_type: "Expense" }],
 			["discount_received_account", { root_type: "Income" }],
 			["exchange_gain_loss_account", { root_type: ["in", ["Expense", "Income"]] }],
-			["unrealized_exchange_gain_loss_account", { root_type: ["in", ["Expense", "Income"]] }],
+			[
+				"unrealized_exchange_gain_loss_account",
+				{ root_type: ["in", ["Expense", "Income", "Equity", "Liability"]] },
+			],
 			[
 				"accumulated_depreciation_account",
 				{ root_type: "Asset", account_type: "Accumulated Depreciation" },
@@ -259,6 +278,8 @@ erpnext.company.setup_queries = function (frm) {
 			["depreciation_expense_account", { root_type: "Expense", account_type: "Depreciation" }],
 			["disposal_account", { report_type: "Profit and Loss" }],
 			["default_inventory_account", { account_type: "Stock" }],
+			["purchase_expense_account", { root_type: "Expense" }],
+			["purchase_expense_contra_account", { root_type: "Expense" }],
 			["cost_center", {}],
 			["round_off_cost_center", {}],
 			["depreciation_cost_center", {}],
@@ -268,6 +289,7 @@ erpnext.company.setup_queries = function (frm) {
 			["default_provisional_account", { root_type: ["in", ["Liability", "Asset"]] }],
 			["default_advance_received_account", { root_type: "Liability", account_type: "Receivable" }],
 			["default_advance_paid_account", { root_type: "Asset", account_type: "Payable" }],
+			["service_expense_account", { root_type: "Expense" }],
 		],
 		function (i, v) {
 			erpnext.company.set_custom_query(frm, v);

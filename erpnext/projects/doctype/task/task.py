@@ -8,7 +8,7 @@ import frappe
 from frappe import _, throw
 from frappe.desk.form.assign_to import clear, close_all_assignments
 from frappe.model.mapper import get_mapped_doc
-from frappe.utils import add_days, cstr, date_diff, flt, get_link_to_form, getdate, today
+from frappe.utils import add_days, add_to_date, cstr, date_diff, flt, get_link_to_form, getdate, today
 from frappe.utils.data import format_date
 from frappe.utils.nestedset import NestedSet
 
@@ -41,8 +41,8 @@ class Task(NestedSet):
 		depends_on_tasks: DF.Code | None
 		description: DF.TextEditor | None
 		duration: DF.Int
-		exp_end_date: DF.Date | None
-		exp_start_date: DF.Date | None
+		exp_end_date: DF.Datetime | None
+		exp_start_date: DF.Datetime | None
 		expected_time: DF.Float
 		is_group: DF.Check
 		is_milestone: DF.Check
@@ -83,12 +83,17 @@ class Task(NestedSet):
 		self.update_depends_on()
 		self.validate_dependencies_for_template_task()
 		self.validate_completed_on()
+		self.set_default_end_date_if_missing()
 
 	def validate_dates(self):
 		self.validate_from_to_dates("exp_start_date", "exp_end_date")
 		self.validate_from_to_dates("act_start_date", "act_end_date")
 		self.validate_parent_expected_end_date()
 		self.validate_parent_project_dates()
+
+	def set_default_end_date_if_missing(self):
+		if self.exp_start_date and self.expected_time:
+			self.exp_end_date = add_to_date(self.exp_start_date, hours=self.expected_time)
 
 	def validate_parent_expected_end_date(self):
 		if not self.parent_task or not self.exp_end_date:
@@ -107,7 +112,7 @@ class Task(NestedSet):
 			)
 
 	def validate_parent_project_dates(self):
-		if not self.project or frappe.flags.in_test:
+		if not self.project or frappe.in_test:
 			return
 
 		if project_end_date := frappe.db.get_value("Project", self.project, "expected_end_date"):
@@ -153,14 +158,14 @@ class Task(NestedSet):
 	def validate_parent_template_task(self):
 		if self.parent_task:
 			if not frappe.db.get_value("Task", self.parent_task, "is_template"):
-				parent_task_format = f"""<a href="#Form/Task/{self.parent_task}">{self.parent_task}</a>"""
+				parent_task_format = f"""<a href="/app/task/{self.parent_task}">{self.parent_task}</a>"""
 				frappe.throw(_("Parent Task {0} is not a Template Task").format(parent_task_format))
 
 	def validate_depends_on_tasks(self):
 		if self.depends_on:
 			for task in self.depends_on:
 				if not frappe.db.get_value("Task", task.task, "is_template"):
-					dependent_task_format = f"""<a href="#Form/Task/{task.task}">{task.task}</a>"""
+					dependent_task_format = f"""<a href="/app/task/{task.task}">{task.task}</a>"""
 					frappe.throw(_("Dependent Task {0} is not a Template Task").format(dependent_task_format))
 
 	def validate_completed_on(self):
@@ -199,8 +204,6 @@ class Task(NestedSet):
 			self.name,
 			as_dict=1,
 		)[0]
-		if self.status == "Open":
-			self.status = "Working"
 		self.total_costing_amount = tl.total_costing_amount
 		self.total_billing_amount = tl.total_billing_amount
 		self.actual_time = tl.time
@@ -250,7 +253,7 @@ class Task(NestedSet):
 				if (
 					task.exp_start_date
 					and task.exp_end_date
-					and task.exp_start_date < getdate(end_date)
+					and task.exp_start_date < end_date
 					and task.status == "Open"
 				):
 					task_duration = date_diff(task.exp_end_date, task.exp_start_date)
@@ -288,7 +291,7 @@ class Task(NestedSet):
 		if self.status not in ("Cancelled", "Completed") and self.exp_end_date:
 			from datetime import datetime
 
-			if self.exp_end_date < datetime.now().date():
+			if self.exp_end_date < datetime.now():
 				self.db_set("status", "Overdue", update_modified=False)
 				self.update_project()
 

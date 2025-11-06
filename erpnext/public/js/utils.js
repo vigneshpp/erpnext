@@ -20,7 +20,11 @@ $.extend(erpnext, {
 	},
 
 	toggle_naming_series: function () {
-		if (cur_frm && cur_frm.fields_dict.naming_series) {
+		if (
+			cur_frm &&
+			cur_frm.fields_dict.naming_series &&
+			cur_frm.meta.naming_rule == 'By "Naming Series" field'
+		) {
 			cur_frm.toggle_display("naming_series", cur_frm.doc.__islocal ? true : false);
 		}
 	},
@@ -209,17 +213,9 @@ $.extend(erpnext.utils, {
 	},
 
 	make_bank_account: function (doctype, docname) {
-		frappe.call({
-			method: "erpnext.accounts.doctype.bank_account.bank_account.make_bank_account",
-			args: {
-				doctype: doctype,
-				docname: docname,
-			},
-			freeze: true,
-			callback: function (r) {
-				var doclist = frappe.model.sync(r.message);
-				frappe.set_route("Form", doclist[0].doctype, doclist[0].name);
-			},
+		frappe.new_doc("Bank Account", {
+			party_type: doctype,
+			party: docname,
 		});
 	},
 
@@ -263,6 +259,10 @@ $.extend(erpnext.utils, {
 								fieldname: dimension["fieldname"],
 								label: __(dimension["doctype"]),
 								fieldtype: "MultiSelectList",
+								depends_on:
+									report_name === "Stock Balance"
+										? "eval:doc.show_dimension_wise_stock === 1"
+										: "",
 								get_data: function (txt) {
 									return frappe.db.get_link_options(dimension["doctype"], txt);
 								},
@@ -282,20 +282,6 @@ $.extend(erpnext.utils, {
 	make_subscription: function (doctype, docname) {
 		frappe.call({
 			method: "frappe.automation.doctype.auto_repeat.auto_repeat.make_auto_repeat",
-			args: {
-				doctype: doctype,
-				docname: docname,
-			},
-			callback: function (r) {
-				var doclist = frappe.model.sync(r.message);
-				frappe.set_route("Form", doclist[0].doctype, doclist[0].name);
-			},
-		});
-	},
-
-	make_pricing_rule: function (doctype, docname) {
-		frappe.call({
-			method: "erpnext.accounts.doctype.pricing_rule.pricing_rule.make_pricing_rule",
 			args: {
 				doctype: doctype,
 				docname: docname,
@@ -420,30 +406,51 @@ $.extend(erpnext.utils, {
 		});
 	},
 
-	get_fiscal_year: function (date, with_dates = false, boolean = false) {
+	get_fiscal_year: function (date, with_dates = false, raise_on_missing = true) {
 		if (!frappe.boot.setup_complete) {
 			return;
 		}
+		const today = frappe.datetime.get_today();
 		if (!date) {
-			date = frappe.datetime.get_today();
+			date = today;
 		}
 
 		let fiscal_year = "";
-		frappe.call({
-			method: "erpnext.accounts.utils.get_fiscal_year",
-			args: {
-				date: date,
-				boolean: boolean,
-			},
-			async: false,
-			callback: function (r) {
-				if (r.message) {
-					if (with_dates) fiscal_year = r.message;
-					else fiscal_year = r.message[0];
-				}
-			},
-		});
+		if (
+			frappe.boot.current_fiscal_year &&
+			date >= frappe.boot.current_fiscal_year[1] &&
+			date <= frappe.boot.current_fiscal_year[2]
+		) {
+			if (with_dates) fiscal_year = frappe.boot.current_fiscal_year;
+			else fiscal_year = frappe.boot.current_fiscal_year[0];
+		} else if (today != date) {
+			frappe.call({
+				method: "erpnext.accounts.utils.get_fiscal_year",
+				type: "GET", // make it cacheable
+				args: {
+					date: date,
+					raise_on_missing: raise_on_missing,
+				},
+				async: false,
+				callback: function (r) {
+					if (r.message) {
+						if (with_dates) fiscal_year = r.message;
+						else fiscal_year = r.message[0];
+					}
+				},
+			});
+		}
 		return fiscal_year;
+	},
+
+	set_letter_head: function (frm) {
+		if (frm.fields_dict.letter_head) {
+			frappe.db.get_value("Company", frm.doc.company, "default_letter_head").then((res) => {
+				if (res.message?.default_letter_head) {
+					frm.set_value("letter_head", res.message.default_letter_head);
+				}
+			});
+		}
 	},
 });
 
@@ -608,6 +615,7 @@ erpnext.utils.update_child_items = function (opts) {
 			docname: d.name,
 			name: d.name,
 			item_code: d.item_code,
+			item_name: d.item_name,
 			delivery_date: d.delivery_date,
 			schedule_date: d.schedule_date,
 			conversion_factor: d.conversion_factor,
@@ -637,7 +645,7 @@ erpnext.utils.update_child_items = function (opts) {
 			get_query: function () {
 				let filters;
 				if (frm.doc.doctype == "Sales Order") {
-					filters = { is_sales_item: 1 };
+					filters = { is_sales_item: 1, is_stock_item: !frm.doc.is_subcontracted };
 				} else if (frm.doc.doctype == "Purchase Order") {
 					if (frm.doc.is_subcontracted) {
 						if (frm.doc.is_old_subcontracting_flow) {
@@ -654,6 +662,77 @@ erpnext.utils.update_child_items = function (opts) {
 					filters: filters,
 				};
 			},
+			onchange: function () {
+				const me = this;
+
+				frm.call({
+					method: "erpnext.stock.get_item_details.get_item_details",
+					args: {
+						doc: frm.doc,
+						ctx: {
+							item_code: this.value,
+							set_warehouse: frm.doc.set_warehouse,
+							customer: frm.doc.customer || frm.doc.party_name,
+							quotation_to: frm.doc.quotation_to,
+							supplier: frm.doc.supplier,
+							currency: frm.doc.currency,
+							is_internal_supplier: frm.doc.is_internal_supplier,
+							is_internal_customer: frm.doc.is_internal_customer,
+							conversion_rate: frm.doc.conversion_rate,
+							price_list: frm.doc.selling_price_list || frm.doc.buying_price_list,
+							price_list_currency: frm.doc.price_list_currency,
+							plc_conversion_rate: frm.doc.plc_conversion_rate,
+							company: frm.doc.company,
+							order_type: frm.doc.order_type,
+							is_pos: cint(frm.doc.is_pos),
+							is_return: cint(frm.doc.is_return),
+							is_subcontracted: frm.doc.is_subcontracted,
+							ignore_pricing_rule: frm.doc.ignore_pricing_rule,
+							doctype: frm.doc.doctype,
+							name: frm.doc.name,
+							qty: me.doc.qty || 1,
+							uom: me.doc.uom,
+							pos_profile: cint(frm.doc.is_pos) ? frm.doc.pos_profile : "",
+							tax_category: frm.doc.tax_category,
+							child_doctype: frm.doc.doctype + " Item",
+							is_old_subcontracting_flow: frm.doc.is_old_subcontracting_flow,
+						},
+					},
+					callback: function (r) {
+						if (r.message) {
+							const {
+								qty,
+								price_list_rate: rate,
+								uom,
+								conversion_factor,
+								item_name,
+								bom_no,
+							} = r.message;
+
+							const row = dialog.fields_dict.trans_items.df.data.find(
+								(row) => row.name == me.doc.name
+							);
+							if (row) {
+								Object.assign(row, {
+									conversion_factor: me.doc.conversion_factor || conversion_factor,
+									uom: me.doc.uom || uom,
+									qty: me.doc.qty || qty,
+									rate: me.doc.rate || rate,
+									item_name: item_name,
+									bom_no: bom_no,
+								});
+								dialog.fields_dict.trans_items.grid.refresh();
+							}
+						}
+					},
+				});
+			},
+		},
+		{
+			fieldtype: "Data",
+			fieldname: "item_name",
+			label: __("Item Name"),
+			read_only: 1,
 		},
 		{
 			fieldtype: "Link",
@@ -722,7 +801,7 @@ erpnext.utils.update_child_items = function (opts) {
 	}
 
 	if (
-		frm.doc.doctype == "Purchase Order" &&
+		["Purchase Order", "Sales Order"].includes(frm.doc.doctype) &&
 		frm.doc.is_subcontracted &&
 		!frm.doc.is_old_subcontracting_flow
 	) {
@@ -778,7 +857,7 @@ erpnext.utils.update_child_items = function (opts) {
 			},
 		],
 		primary_action: function () {
-			if (frm.doctype == "Sales Order" && has_reserved_stock) {
+			if (frm.doctype == "Sales Order" && has_reserved_stock && frm.doc.is_subcontracted == 0) {
 				this.hide();
 				frappe.confirm(
 					__(
@@ -921,6 +1000,7 @@ erpnext.utils.map_current_doc = function (opts) {
 			target: opts.target,
 			date_field: opts.date_field || undefined,
 			setters: opts.setters,
+			read_only_setters: opts.read_only_setters,
 			data_fields: data_fields,
 			get_query: opts.get_query,
 			add_filters_group: 1,
@@ -934,10 +1014,12 @@ erpnext.utils.map_current_doc = function (opts) {
 					frappe.msgprint(__("Please select {0}", [opts.source_doctype]));
 					return;
 				}
-				opts.source_name = values;
+
+				opts.source_name = Array.isArray(values) ? [...new Set(values)] : values;
+
 				if (
 					opts.allow_child_item_selection ||
-					["Purchase Receipt", "Delivery Note"].includes(opts.source_doctype)
+					["Purchase Receipt", "Delivery Note", "Pick List"].includes(opts.source_doctype)
 				) {
 					// args contains filtered child docnames
 					opts.args = args;
@@ -956,41 +1038,36 @@ erpnext.utils.map_current_doc = function (opts) {
 	}
 };
 
-frappe.form.link_formatters["Item"] = function (value, doc) {
-	if (doc && value && doc.item_name && doc.item_name !== value && doc.item_code === value) {
-		return value + ": " + doc.item_name;
-	} else if (!value && doc.doctype && doc.item_name) {
-		// format blank value in child table
-		return doc.item_name;
-	} else {
-		// if value is blank in report view or item code and name are the same, return as is
-		return value;
-	}
+frappe.form.link_formatters["Item"] = function (value, doc, df) {
+	return add_link_title(value, doc, df, "item_name");
 };
 
-frappe.form.link_formatters["Employee"] = function (value, doc) {
-	if (doc && value && doc.employee_name && doc.employee_name !== value && doc.employee === value) {
-		return value + ": " + doc.employee_name;
-	} else if (!value && doc.doctype && doc.employee_name) {
-		// format blank value in child table
-		return doc.employee;
-	} else {
-		// if value is blank in report view or project name and name are the same, return as is
-		return value;
-	}
+frappe.form.link_formatters["Employee"] = function (value, doc, df) {
+	return add_link_title(value, doc, df, "employee_name");
 };
 
-frappe.form.link_formatters["Project"] = function (value, doc) {
-	if (doc && value && doc.project_name && doc.project_name !== value && doc.project === value) {
-		return value + ": " + doc.project_name;
-	} else if (!value && doc.doctype && doc.project_name) {
-		// format blank value in child table
-		return doc.project;
+frappe.form.link_formatters["Project"] = function (value, doc, df) {
+	return add_link_title(value, doc, df, "project_name");
+};
+
+/**
+ * Add a title to a link value based on the provided document and field information.
+ *
+ * @param {string} value - The value to add a link title to.
+ * @param {Object} doc - The document object.
+ * @param {Object} df - The field object.
+ * @param {string} title_field - The field name for the title.
+ * @returns {string} - The link value with the added title.
+ */
+function add_link_title(value, doc, df, title_field) {
+	if (doc && value && doc[title_field] && doc[title_field] !== value && doc[df.fieldname] === value) {
+		return value + ": " + doc[title_field];
+	} else if (!value && doc.doctype && doc[title_field]) {
+		return doc[title_field];
 	} else {
-		// if value is blank in report view or project name and name are the same, return as is
 		return value;
 	}
-};
+}
 
 // add description on posting time
 $(document).on("app_ready", function () {
@@ -1136,9 +1213,9 @@ function set_time_to_resolve_and_response(frm, apply_sla_for_resolution) {
 	if (apply_sla_for_resolution) {
 		let time_to_resolve;
 		if (!frm.doc.resolution_date) {
-			time_to_resolve = get_time_left(frm.doc.resolution_by, frm.doc.agreement_status);
+			time_to_resolve = get_time_left(frm.doc.sla_resolution_by, frm.doc.agreement_status);
 		} else {
-			time_to_resolve = get_status(frm.doc.resolution_by, frm.doc.resolution_date);
+			time_to_resolve = get_status(frm.doc.sla_resolution_by, frm.doc.sla_resolution_date);
 		}
 
 		alert += `
@@ -1183,5 +1260,40 @@ $.extend(erpnext.stock.utils, {
 	set_item_details_using_barcode(frm, child_row, callback) {
 		const barcode_scanner = new erpnext.utils.BarcodeScanner({ frm: frm });
 		barcode_scanner.scan_api_call(child_row.barcode, callback);
+	},
+
+	get_serial_range(range_string, separator) {
+		/* Return an array of serial numbers generated from a range string.
+
+		Examples (using separator "::"):
+			- "1::5" => ["1", "2", "3", "4", "5"]
+			- "SN0009::12" => ["SN0009", "SN0010", "SN0011", "SN0012"]
+			- "ABC//05::8" => ["ABC//05", "ABC//06", "ABC//07", "ABC//08"]
+		*/
+		if (!range_string) {
+			return;
+		}
+
+		const [start_str, end_str] = range_string.trim().split(separator);
+
+		if (!start_str || !end_str) {
+			return;
+		}
+
+		const end_int = parseInt(end_str);
+		const length_difference = start_str.length - end_str.length;
+		const start_int = parseInt(start_str.substring(length_difference));
+
+		if (isNaN(start_int) || isNaN(end_int)) {
+			return;
+		}
+
+		const serial_numbers = Array(end_int - start_int + 1)
+			.fill(1)
+			.map((x, y) => x + y)
+			.map((x) => x + start_int - 1);
+		return serial_numbers.map((val) => {
+			return start_str.substring(0, length_difference) + val.toString().padStart(end_str.length, "0");
+		});
 	},
 });

@@ -30,7 +30,9 @@ class SalesOrderItem(Document):
 		blanket_order_rate: DF.Currency
 		bom_no: DF.Link | None
 		brand: DF.Link | None
+		company_total_stock: DF.Float
 		conversion_factor: DF.Float
+		cost_center: DF.Link | None
 		customer_item_code: DF.Data | None
 		delivered_by_supplier: DF.Check
 		delivered_qty: DF.Float
@@ -38,7 +40,10 @@ class SalesOrderItem(Document):
 		description: DF.TextEditor | None
 		discount_amount: DF.Currency
 		discount_percentage: DF.Percent
+		distributed_discount_amount: DF.Currency
 		ensure_delivery_based_on_produced_serial_no: DF.Check
+		fg_item: DF.Link | None
+		fg_item_qty: DF.Float
 		grant_commission: DF.Check
 		gross_profit: DF.Currency
 		image: DF.Attach | None
@@ -67,6 +72,7 @@ class SalesOrderItem(Document):
 		pricing_rules: DF.SmallText | None
 		produced_qty: DF.Float
 		production_plan_qty: DF.Float
+		project: DF.Link | None
 		projected_qty: DF.Float
 		purchase_order: DF.Link | None
 		purchase_order_item: DF.Data | None
@@ -80,6 +86,7 @@ class SalesOrderItem(Document):
 		stock_reserved_qty: DF.Float
 		stock_uom: DF.Link | None
 		stock_uom_rate: DF.Currency
+		subcontracted_qty: DF.Float
 		supplier: DF.Link | None
 		target_warehouse: DF.Link | None
 		total_weight: DF.Float

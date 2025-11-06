@@ -47,9 +47,11 @@ def validate_columns(data):
 
 	no_of_columns = max([len(d) for d in data])
 
-	if no_of_columns > 8:
+	if no_of_columns != 8:
 		frappe.throw(
-			_("More columns found than expected. Please compare the uploaded file with standard template"),
+			_(
+				"Columns are not according to template. Please compare the uploaded file with standard template"
+			),
 			title=(_("Wrong Template")),
 		)
 
@@ -460,9 +462,8 @@ def unset_existing_data(company):
 		"Sales Taxes and Charges Template",
 		"Purchase Taxes and Charges Template",
 	]:
-		frappe.db.sql(
-			f'''delete from `tab{doctype}` where `company`="%s"''' % (company)  # nosec
-		)
+		dt = frappe.qb.DocType(doctype)
+		frappe.qb.from_(dt).where(dt.company == company).delete().run()
 
 
 def set_default_accounts(company):

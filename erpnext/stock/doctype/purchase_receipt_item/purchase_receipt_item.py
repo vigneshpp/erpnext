@@ -16,6 +16,7 @@ class PurchaseReceiptItem(Document):
 
 		allow_zero_valuation_rate: DF.Check
 		amount: DF.Currency
+		amount_difference_with_purchase_invoice: DF.Currency
 		apply_tds: DF.Check
 		asset_category: DF.Link | None
 		asset_location: DF.Link | None
@@ -36,6 +37,7 @@ class PurchaseReceiptItem(Document):
 		description: DF.TextEditor | None
 		discount_amount: DF.Currency
 		discount_percentage: DF.Percent
+		distributed_discount_amount: DF.Currency
 		expense_account: DF.Link | None
 		from_warehouse: DF.Link | None
 		has_item_scanned: DF.Check
@@ -76,7 +78,6 @@ class PurchaseReceiptItem(Document):
 		qty: DF.Float
 		quality_inspection: DF.Link | None
 		rate: DF.Currency
-		rate_difference_with_purchase_invoice: DF.Currency
 		rate_with_margin: DF.Currency
 		received_qty: DF.Float
 		received_stock_qty: DF.Float
@@ -85,8 +86,10 @@ class PurchaseReceiptItem(Document):
 		rejected_serial_no: DF.Text | None
 		rejected_warehouse: DF.Link | None
 		retain_sample: DF.Check
+		return_qty_from_rejected_warehouse: DF.Check
 		returned_qty: DF.Float
 		rm_supp_cost: DF.Currency
+		sales_incoming_rate: DF.Currency
 		sales_order: DF.Link | None
 		sales_order_item: DF.Data | None
 		sample_quantity: DF.Int

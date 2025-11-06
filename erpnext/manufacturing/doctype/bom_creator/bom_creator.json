@@ -19,6 +19,8 @@
   "qty",
   "project",
   "uom",
+  "section_break_xvld",
+  "routing",
   "raw_materials_tab",
   "currency_detail",
   "rm_cost_as_per",
@@ -278,8 +280,20 @@
    "fieldtype": "Text",
    "label": "Error Log",
    "read_only": 1
+  },
+  {
+   "fieldname": "section_break_xvld",
+   "fieldtype": "Section Break",
+   "label": "Operations Routing"
+  },
+  {
+   "fieldname": "routing",
+   "fieldtype": "Link",
+   "label": "Routing",
+   "options": "Routing"
   }
  ],
+ "hide_toolbar": 1,
  "icon": "fa fa-sitemap",
  "is_submittable": 1,
  "links": [
@@ -288,7 +302,7 @@
    "link_fieldname": "bom_creator"
   }
  ],
- "modified": "2024-04-02 16:30:59.779190",
+ "modified": "2024-11-25 16:41:03.047835",
  "modified_by": "Administrator",
  "module": "Manufacturing",
  "name": "BOM Creator",

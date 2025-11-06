@@ -22,12 +22,14 @@ class AssetFinanceBook(Document):
 		expected_value_after_useful_life: DF.Currency
 		finance_book: DF.Link | None
 		frequency_of_depreciation: DF.Int
+		increase_in_asset_life: DF.Int
 		parent: DF.Data
 		parentfield: DF.Data
 		parenttype: DF.Data
 		rate_of_depreciation: DF.Percent
 		salvage_value_percentage: DF.Percent
 		shift_based: DF.Check
+		total_number_of_booked_depreciations: DF.Int
 		total_number_of_depreciations: DF.Int
 		value_after_depreciation: DF.Currency
 	# end: auto-generated types

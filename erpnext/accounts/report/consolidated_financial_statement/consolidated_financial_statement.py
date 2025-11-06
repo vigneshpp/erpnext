@@ -38,6 +38,7 @@ from erpnext.accounts.report.profit_and_loss_statement.profit_and_loss_statement
 	get_report_summary as get_pl_summary,
 )
 from erpnext.accounts.report.utils import convert, convert_to_presentation_currency
+from erpnext.accounts.utils import get_zero_cutoff
 
 
 def execute(filters=None):
@@ -104,7 +105,7 @@ def get_balance_sheet_data(fiscal_year, companies, columns, filters):
 	if total_credit:
 		data.append(total_credit)
 
-	report_summary = get_bs_summary(
+	report_summary, primitive_summary = get_bs_summary(
 		companies,
 		asset,
 		liability,
@@ -115,7 +116,7 @@ def get_balance_sheet_data(fiscal_year, companies, columns, filters):
 		True,
 	)
 
-	chart = get_chart_data(filters, columns, asset, liability, equity)
+	chart = get_chart_data(filters, columns, asset, liability, equity, company_currency)
 
 	return data, message, chart, report_summary
 
@@ -173,9 +174,9 @@ def get_profit_loss_data(fiscal_year, companies, columns, filters):
 	if net_profit_loss:
 		data.append(net_profit_loss)
 
-	chart = get_pl_chart_data(filters, columns, income, expense, net_profit_loss)
+	chart = get_pl_chart_data(filters, columns, income, expense, net_profit_loss, company_currency)
 
-	report_summary = get_pl_summary(
+	report_summary, primitive_summary = get_pl_summary(
 		companies, "", income, expense, net_profit_loss, company_currency, filters, True
 	)
 
@@ -351,7 +352,7 @@ def get_data(companies, root_type, balance_must_be, fiscal_year, filters=None, i
 			gl_entries_by_account,
 			accounts_by_name,
 			accounts,
-			ignore_closing_entries=False,
+			ignore_closing_entries=ignore_closing_entries,
 			root_type=root_type,
 		)
 
@@ -470,10 +471,13 @@ def update_parent_account_names(accounts):
 
 	for d in accounts:
 		if d.account_number:
-			account_name = d.account_number + " - " + d.account_name
+			account_key = d.account_number + " - " + d.account_name
 		else:
-			account_name = d.account_name
-		name_to_account_map[d.name] = account_name
+			account_key = d.account_name
+
+		d.account_key = account_key
+
+		name_to_account_map[d.name] = account_key
 
 	for account in accounts:
 		if account.parent_account:
@@ -506,33 +510,26 @@ def get_subsidiary_companies(company):
 
 def get_accounts(root_type, companies):
 	accounts = []
-	added_accounts = []
 
 	for company in companies:
-		for account in frappe.get_all(
-			"Account",
-			fields=[
-				"name",
-				"is_group",
-				"company",
-				"parent_account",
-				"lft",
-				"rgt",
-				"root_type",
-				"report_type",
-				"account_name",
-				"account_number",
-			],
-			filters={"company": company, "root_type": root_type},
-		):
-			if account.account_number:
-				account_key = account.account_number + "-" + account.account_name
-			else:
-				account_key = account.account_name
-
-			if account_key not in added_accounts:
-				accounts.append(account)
-				added_accounts.append(account_key)
+		accounts.extend(
+			frappe.get_all(
+				"Account",
+				fields=[
+					"name",
+					"is_group",
+					"company",
+					"parent_account",
+					"lft",
+					"rgt",
+					"root_type",
+					"report_type",
+					"account_name",
+					"account_number",
+				],
+				filters={"company": company, "root_type": root_type},
+			)
+		)
 
 	return accounts
 
@@ -568,7 +565,7 @@ def prepare_data(accounts, start_date, end_date, balance_must_be, companies, com
 
 			row[company] = flt(d.get(company, 0.0), 3)
 
-			if abs(row[company]) >= 0.005:
+			if abs(row[company]) >= get_zero_cutoff(filters.presentation_currency):
 				# ignore zero values
 				has_value = True
 				total += flt(row[company])
@@ -771,15 +768,17 @@ def add_total_row(out, root_type, balance_must_be, companies, company_currency):
 def filter_accounts(accounts, depth=10):
 	parent_children_map = {}
 	accounts_by_name = {}
-	for d in accounts:
-		if d.account_number:
-			account_name = d.account_number + " - " + d.account_name
-		else:
-			account_name = d.account_name
-		d["company_wise_opening_bal"] = defaultdict(float)
-		accounts_by_name[account_name] = d
+	added_accounts = []
 
-		parent_children_map.setdefault(d.parent_account or None, []).append(d)
+	for d in accounts:
+		if d.account_key in added_accounts:
+			continue
+
+		added_accounts.append(d.account_key)
+		d["company_wise_opening_bal"] = defaultdict(float)
+		accounts_by_name[d.account_key] = d
+
+		parent_children_map.setdefault(d.parent_account_name or None, []).append(d)
 
 	filtered_accounts = []
 
@@ -791,7 +790,7 @@ def filter_accounts(accounts, depth=10):
 			for child in children:
 				child.indent = level
 				filtered_accounts.append(child)
-				add_to_list(child.name, level + 1)
+				add_to_list(child.account_key, level + 1)
 
 	add_to_list(None, 0)
 

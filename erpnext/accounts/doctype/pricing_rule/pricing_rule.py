@@ -27,9 +27,7 @@ class PricingRule(Document):
 		from frappe.types import DF
 
 		from erpnext.accounts.doctype.pricing_rule_brand.pricing_rule_brand import PricingRuleBrand
-		from erpnext.accounts.doctype.pricing_rule_item_code.pricing_rule_item_code import (
-			PricingRuleItemCode,
-		)
+		from erpnext.accounts.doctype.pricing_rule_item_code.pricing_rule_item_code import PricingRuleItemCode
 		from erpnext.accounts.doctype.pricing_rule_item_group.pricing_rule_item_group import (
 			PricingRuleItemGroup,
 		)
@@ -62,11 +60,13 @@ class PricingRule(Document):
 		disable: DF.Check
 		discount_amount: DF.Currency
 		discount_percentage: DF.Float
+		dont_enforce_free_item_qty: DF.Check
 		for_price_list: DF.Link | None
 		free_item: DF.Link | None
 		free_item_rate: DF.Currency
 		free_item_uom: DF.Link | None
 		free_qty: DF.Float
+		has_priority: DF.Check
 		is_cumulative: DF.Check
 		is_recursive: DF.Check
 		item_groups: DF.Table[PricingRuleItemGroup]
@@ -140,6 +140,7 @@ class PricingRule(Document):
 		self.validate_price_list_with_currency()
 		self.validate_dates()
 		self.validate_condition()
+		self.validate_mixed_with_recursion()
 
 		if not self.margin_type:
 			self.margin_rate_or_amount = 0.0
@@ -156,13 +157,19 @@ class PricingRule(Document):
 				frappe.throw(_("Duplicate {0} found in the table").format(self.apply_on))
 
 	def validate_mandatory(self):
+		if self.has_priority and not self.priority:
+			throw(_("Priority is mandatory"), frappe.MandatoryError, _("Please Set Priority"))
+
+		if self.priority and not self.has_priority:
+			self.has_priority = 1
+
 		for apply_on, field in apply_on_dict.items():
 			if self.apply_on == apply_on and len(self.get(field) or []) < 1:
 				throw(_("{0} is not added in the table").format(apply_on), frappe.MandatoryError)
 
 		tocheck = frappe.scrub(self.get("applicable_for", ""))
 		if tocheck and not self.get(tocheck):
-			throw(_("{0} is required").format(self.meta.get_label(tocheck)), frappe.MandatoryError)
+			throw(_("{0} is required").format(_(self.meta.get_label(tocheck))), frappe.MandatoryError)
 
 		if self.apply_rule_on_other:
 			o_field = "other_" + frappe.scrub(self.apply_rule_on_other)
@@ -180,7 +187,8 @@ class PricingRule(Document):
 			if not self.priority:
 				throw(
 					_("As the field {0} is enabled, the field {1} is mandatory.").format(
-						frappe.bold("Apply Discount on Discounted Rate"), frappe.bold("Priority")
+						frappe.bold(_("Apply Discount on Discounted Rate")),
+						frappe.bold(_("Priority")),
 					)
 				)
 
@@ -188,7 +196,7 @@ class PricingRule(Document):
 				throw(
 					_(
 						"As the field {0} is enabled, the value of the field {1} should be more than 1."
-					).format(frappe.bold("Apply Discount on Discounted Rate"), frappe.bold("Priority"))
+					).format(frappe.bold(_("Apply Discount on Discounted Rate")), frappe.bold(_("Priority")))
 				)
 
 	def validate_applicable_for_selling_or_buying(self):
@@ -302,6 +310,10 @@ class PricingRule(Document):
 			and re.match(r'[\w\.:_]+\s*={1}\s*[\w\.@\'"]+', self.condition)
 		):
 			frappe.throw(_("Invalid condition expression"))
+
+	def validate_mixed_with_recursion(self):
+		if self.mixed_conditions and self.is_recursive:
+			frappe.throw(_("Recursive Discounts with Mixed condition is not supported by the system"))
 
 
 # --------------------------------------------------------------------------------
@@ -435,7 +447,19 @@ def get_pricing_rule_for_item(args, doc=None, for_validate=False):
 			if isinstance(pricing_rule, str):
 				pricing_rule = frappe.get_cached_doc("Pricing Rule", pricing_rule)
 				update_pricing_rule_uom(pricing_rule, args)
-				pricing_rule.apply_rule_on_other_items = get_pricing_rule_items(pricing_rule) or []
+				fetch_other_item = True if pricing_rule.apply_rule_on_other else False
+				pricing_rule.apply_rule_on_other_items = (
+					get_pricing_rule_items(pricing_rule, other_items=fetch_other_item) or []
+				)
+
+			if pricing_rule.get("coupon_code_based") == 1:
+				if not args.coupon_code:
+					continue
+				coupon_code = frappe.db.get_value(
+					doctype="Coupon Code", filters={"pricing_rule": pricing_rule.name}, fieldname="name"
+				)
+				if args.coupon_code != coupon_code:
+					continue
 
 			if pricing_rule.get("suggestion"):
 				continue
@@ -461,9 +485,6 @@ def get_pricing_rule_for_item(args, doc=None, for_validate=False):
 					item_details["apply_rule_on_other_items"] = json.dumps(
 						pricing_rule.apply_rule_on_other_items
 					)
-
-			if pricing_rule.coupon_code_based == 1 and args.coupon_code is None:
-				return item_details
 
 			if not pricing_rule.validate_applied_rule:
 				if pricing_rule.price_or_product_discount == "Price":
@@ -624,7 +645,7 @@ def remove_pricing_rule_for_item(pricing_rules, item_details, item_code=None, ra
 			if pricing_rule.margin_type in ["Percentage", "Amount"]:
 				item_details.margin_rate_or_amount = 0.0
 				item_details.margin_type = None
-		elif pricing_rule.get("free_item"):
+		elif pricing_rule.get("free_item") and not pricing_rule.get("dont_enforce_free_item_qty"):
 			item_details.remove_free_item = (
 				item_code if pricing_rule.get("same_item") else pricing_rule.get("free_item")
 			)
@@ -679,17 +700,6 @@ def set_transaction_type(args):
 		args.transaction_type = "selling"
 	else:
 		args.transaction_type = "buying"
-
-
-@frappe.whitelist()
-def make_pricing_rule(doctype, docname):
-	doc = frappe.new_doc("Pricing Rule")
-	doc.applicable_for = doctype
-	doc.set(frappe.scrub(doctype), docname)
-	doc.selling = 1 if doctype == "Customer" else 0
-	doc.buying = 1 if doctype == "Supplier" else 0
-
-	return doc
 
 
 @frappe.whitelist()

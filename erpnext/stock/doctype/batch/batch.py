@@ -2,7 +2,7 @@
 # License: GNU General Public License v3. See license.txt
 
 
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 
 import frappe
 from frappe import _
@@ -37,7 +37,7 @@ def batch_uses_naming_series():
 	Verify if the Batch is to be named using a naming series
 	:return: bool
 	"""
-	use_naming_series = cint(frappe.db.get_single_value("Stock Settings", "use_naming_series"))
+	use_naming_series = cint(frappe.get_single_value("Stock Settings", "use_naming_series"))
 	return bool(use_naming_series)
 
 
@@ -49,7 +49,7 @@ def _get_batch_prefix():
 	is set to use naming series.
 	:return: The naming series.
 	"""
-	naming_series_prefix = frappe.db.get_single_value("Stock Settings", "naming_series_prefix")
+	naming_series_prefix = frappe.get_single_value("Stock Settings", "naming_series_prefix")
 	if not naming_series_prefix:
 		naming_series_prefix = "BATCH-"
 
@@ -156,23 +156,58 @@ class Batch(Document):
 		if frappe.db.get_value("Item", self.item, "has_batch_no") == 0:
 			frappe.throw(_("The selected item cannot have Batch"))
 
+	@frappe.whitelist()
+	def recalculate_batch_qty(self):
+		batches = get_batch_qty(
+			batch_no=self.name, item_code=self.item, for_stock_levels=True, consider_negative_batches=True
+		)
+		batch_qty = 0.0
+		if batches:
+			for row in batches:
+				batch_qty += row.get("qty")
+
+		self.db_set("batch_qty", batch_qty)
+		frappe.msgprint(_("Batch Qty updated to {0}").format(batch_qty), alert=True)
+
 	def set_batchwise_valuation(self):
+		from erpnext.stock.utils import get_valuation_method
+
 		if self.is_new():
+			if get_valuation_method(self.item) == "Moving Average" and frappe.get_single_value(
+				"Stock Settings", "do_not_use_batchwise_valuation"
+			):
+				self.use_batchwise_valuation = 0
+				return
+
 			self.use_batchwise_valuation = 1
 
 	def before_save(self):
+		self.set_expiry_date()
+
+	def set_expiry_date(self):
 		has_expiry_date, shelf_life_in_days = frappe.db.get_value(
 			"Item", self.item, ["has_expiry_date", "shelf_life_in_days"]
 		)
+
 		if not self.expiry_date and has_expiry_date and shelf_life_in_days:
-			self.expiry_date = add_days(self.manufacturing_date, shelf_life_in_days)
+			if (
+				not self.manufacturing_date
+				and self.reference_doctype in ["Stock Entry", "Purchase Receipt", "Purchase Invoice"]
+				and self.reference_name
+			):
+				self.manufacturing_date = frappe.db.get_value(
+					self.reference_doctype, self.reference_name, "posting_date"
+				)
+
+			if self.manufacturing_date:
+				self.expiry_date = add_days(self.manufacturing_date, shelf_life_in_days)
 
 		if has_expiry_date and not self.expiry_date:
 			frappe.throw(
 				msg=_("Please set {0} for Batched Item {1}, which is used to set {2} on Submit.").format(
-					frappe.bold("Shelf Life in Days"),
+					frappe.bold(_("Shelf Life in Days")),
 					get_link_to_form("Item", self.item),
-					frappe.bold("Batch Expiry Date"),
+					frappe.bold(_("Batch Expiry Date")),
 				),
 				title=_("Expiry Date Mandatory"),
 			)
@@ -196,9 +231,14 @@ def get_batch_qty(
 	batch_no=None,
 	warehouse=None,
 	item_code=None,
+	creation=None,
+	posting_datetime=None,
 	posting_date=None,
 	posting_time=None,
 	ignore_voucher_nos=None,
+	for_stock_levels=False,
+	consider_negative_batches=False,
+	do_not_check_future_batches=False,
 ):
 	"""Returns batch actual qty if warehouse is passed,
 	        or returns dict of qty by warehouse if warehouse is None
@@ -207,9 +247,11 @@ def get_batch_qty(
 
 	:param batch_no: Optional - give qty for this batch no
 	:param warehouse: Optional - give qty for this warehouse
-	:param item_code: Optional - give qty for this item"""
+	:param item_code: Optional - give qty for this item
+	:param for_stock_levels: True consider expired batches"""
 
 	from erpnext.stock.doctype.serial_and_batch_bundle.serial_and_batch_bundle import (
+		combine_datetime,
 		get_auto_batch_nos,
 	)
 
@@ -218,12 +260,19 @@ def get_batch_qty(
 		{
 			"item_code": item_code,
 			"warehouse": warehouse,
-			"posting_date": posting_date,
-			"posting_time": posting_time,
+			"creation": creation,
 			"batch_no": batch_no,
+			"based_on": frappe.get_single_value("Stock Settings", "pick_serial_and_batch_based_on"),
 			"ignore_voucher_nos": ignore_voucher_nos,
+			"for_stock_levels": for_stock_levels,
+			"consider_negative_batches": consider_negative_batches,
+			"do_not_check_future_batches": do_not_check_future_batches,
 		}
 	)
+
+	kwargs["posting_datetime"] = posting_datetime
+	if not kwargs.get("posting_datetime") and posting_date:
+		kwargs["posting_datetime"] = combine_datetime(posting_date, posting_time)
 
 	batches = get_auto_batch_nos(kwargs)
 
@@ -306,6 +355,7 @@ def make_batch_bundle(
 ):
 	from frappe.utils import nowtime, today
 
+	from erpnext.stock.doctype.serial_and_batch_bundle.serial_and_batch_bundle import combine_datetime
 	from erpnext.stock.serial_batch_bundle import SerialBatchCreation
 
 	return (
@@ -313,8 +363,7 @@ def make_batch_bundle(
 			{
 				"item_code": item_code,
 				"warehouse": warehouse,
-				"posting_date": today(),
-				"posting_time": nowtime(),
+				"posting_datetime": combine_datetime(today(), nowtime()),
 				"voucher_type": "Stock Entry",
 				"qty": qty,
 				"type_of_transaction": type_of_transaction,
@@ -425,14 +474,25 @@ def get_pos_reserved_batch_qty(filters):
 
 def get_available_batches(kwargs):
 	from erpnext.stock.doctype.serial_and_batch_bundle.serial_and_batch_bundle import (
+		combine_datetime,
 		get_auto_batch_nos,
 	)
 
-	batchwise_qty = defaultdict(float)
+	if kwargs.get("posting_date"):
+		kwargs["posting_datetime"] = combine_datetime(kwargs.get("posting_date"), kwargs.get("posting_time"))
+
+	batchwise_qty = OrderedDict()
 
 	batches = get_auto_batch_nos(kwargs)
 	for batch in batches:
-		batchwise_qty[batch.get("batch_no")] += batch.get("qty")
+		key = batch.get("batch_no")
+		if kwargs.get("based_on_warehouse"):
+			key = (batch.get("batch_no"), batch.get("warehouse"))
+
+		if key not in batchwise_qty:
+			batchwise_qty[key] = batch.get("qty")
+		else:
+			batchwise_qty[key] += batch.get("qty")
 
 	return batchwise_qty
 

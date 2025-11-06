@@ -2,7 +2,7 @@
 # See license.txt
 
 import frappe
-from frappe.tests.utils import FrappeTestCase
+from frappe.tests import IntegrationTestCase
 
 from erpnext.stock.doctype.batch.test_batch import make_new_batch
 from erpnext.stock.doctype.item.test_item import make_item
@@ -16,7 +16,7 @@ from erpnext.stock.doctype.warehouse.test_warehouse import create_warehouse
 from erpnext.stock.get_item_details import get_conversion_factor
 
 
-class TestPutawayRule(FrappeTestCase):
+class TestPutawayRule(IntegrationTestCase):
 	def setUp(self):
 		if not frappe.db.exists("Item", "_Rice"):
 			make_item(
@@ -377,7 +377,7 @@ class TestPutawayRule(FrappeTestCase):
 			apply_putaway_rule=1,
 			do_not_save=1,
 		)
-		stock_entry.save()
+		stock_entry.submit()
 		stock_entry.load_from_db()
 
 		self.assertEqual(stock_entry.items[0].t_warehouse, self.warehouse_1)
@@ -398,11 +398,17 @@ class TestPutawayRule(FrappeTestCase):
 
 		self.assertUnchangedItemsOnResave(stock_entry)
 
-		for row in stock_entry.items:
-			if row.serial_and_batch_bundle:
-				frappe.delete_doc("Serial and Batch Bundle", row.serial_and_batch_bundle)
-
 		stock_entry.load_from_db()
+		stock_entry.cancel()
+
+		rivs = frappe.get_all("Repost Item Valuation", filters={"voucher_no": stock_entry.name})
+		for row in rivs:
+			riv_doc = frappe.get_doc("Repost Item Valuation", row.name)
+			riv_doc.cancel()
+			riv_doc.delete()
+
+		frappe.db.set_single_value("Accounts Settings", "delete_linked_ledger_entries", 1)
+
 		stock_entry.delete()
 		pr.cancel()
 		rule_1.delete()

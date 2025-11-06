@@ -35,10 +35,11 @@ class Customer(TransactionBase):
 			AllowedToTransactWith,
 		)
 		from erpnext.accounts.doctype.party_account.party_account import PartyAccount
-		from erpnext.selling.doctype.customer_credit_limit.customer_credit_limit import (
-			CustomerCreditLimit,
-		)
+		from erpnext.selling.doctype.customer_credit_limit.customer_credit_limit import CustomerCreditLimit
 		from erpnext.selling.doctype.sales_team.sales_team import SalesTeam
+		from erpnext.selling.doctype.supplier_number_at_customer.supplier_number_at_customer import (
+			SupplierNumberAtCustomer,
+		)
 		from erpnext.utilities.doctype.portal_user.portal_user import PortalUser
 
 		account_manager: DF.Link | None
@@ -51,7 +52,7 @@ class Customer(TransactionBase):
 		customer_pos_id: DF.Data | None
 		customer_primary_address: DF.Link | None
 		customer_primary_contact: DF.Link | None
-		customer_type: DF.Literal["Company", "Individual", "Proprietorship", "Partnership"]
+		customer_type: DF.Literal["Company", "Individual", "Partnership"]
 		default_bank_account: DF.Link | None
 		default_commission_rate: DF.Float
 		default_currency: DF.Link | None
@@ -60,12 +61,14 @@ class Customer(TransactionBase):
 		disabled: DF.Check
 		dn_required: DF.Check
 		email_id: DF.ReadOnly | None
+		first_name: DF.ReadOnly | None
 		gender: DF.Link | None
 		image: DF.AttachImage | None
 		industry: DF.Link | None
 		is_frozen: DF.Check
 		is_internal_customer: DF.Check
 		language: DF.Link | None
+		last_name: DF.ReadOnly | None
 		lead_name: DF.Link | None
 		loyalty_program: DF.Link | None
 		loyalty_program_tier: DF.Data | None
@@ -76,10 +79,12 @@ class Customer(TransactionBase):
 		payment_terms: DF.Link | None
 		portal_users: DF.Table[PortalUser]
 		primary_address: DF.Text | None
+		prospect_name: DF.Link | None
 		represents_company: DF.Link | None
 		sales_team: DF.Table[SalesTeam]
 		salutation: DF.Link | None
 		so_required: DF.Check
+		supplier_numbers: DF.Table[SupplierNumberAtCustomer]
 		tax_category: DF.Link | None
 		tax_id: DF.Data | None
 		tax_withholding_category: DF.Link | None
@@ -103,7 +108,7 @@ class Customer(TransactionBase):
 		elif cust_master_name == "Naming Series":
 			set_name_by_naming_series(self)
 		else:
-			self.name = set_name_from_naming_options(frappe.get_meta(self.doctype).autoname, self)
+			set_name_from_naming_options(frappe.get_meta(self.doctype).autoname, self)
 
 	def get_customer_name(self):
 		if frappe.db.get_value("Customer", self.customer_name) and not frappe.flags.in_import:
@@ -144,10 +149,10 @@ class Customer(TransactionBase):
 		self.validate_default_bank_account()
 		self.validate_internal_customer()
 		self.add_role_for_user()
+		self.validate_currency_for_receivable_payable_and_advance_account()
 
 		# set loyalty program tier
-		if frappe.db.exists("Customer", self.name):
-			customer = frappe.get_doc("Customer", self.name)
+		if not self.is_new() and (customer := self.get_doc_before_save()):
 			if self.loyalty_program == customer.loyalty_program and not self.loyalty_program_tier:
 				self.loyalty_program_tier = customer.loyalty_program_tier
 
@@ -201,6 +206,7 @@ class Customer(TransactionBase):
 	def validate_internal_customer(self):
 		if not self.is_internal_customer:
 			self.represents_company = ""
+			return
 
 		internal_customer = frappe.db.get_value(
 			"Customer",
@@ -246,7 +252,7 @@ class Customer(TransactionBase):
 
 	def create_primary_contact(self):
 		if not self.customer_primary_contact and not self.lead_name:
-			if self.mobile_no or self.email_id:
+			if self.mobile_no or self.email_id or self.first_name or self.last_name:
 				contact = make_contact(self)
 				self.db_set("customer_primary_contact", contact.name)
 				self.db_set("mobile_no", self.mobile_no)
@@ -434,6 +440,31 @@ def make_opportunity(source_name, target_doc=None):
 	return target_doc
 
 
+@frappe.whitelist()
+def make_payment_entry(source_name, target_doc=None):
+	def set_missing_values(source, target):
+		_set_missing_values(source, target)
+
+	target_doc = get_mapped_doc(
+		"Customer",
+		source_name,
+		{
+			"Customer": {
+				"doctype": "Payment Entry",
+				"field_map": {
+					"name": "party",
+				},
+			}
+		},
+		target_doc,
+		set_missing_values,
+	)
+	target_doc.party_type = "Customer"
+	target_doc.party_name = target_doc.party
+
+	return target_doc
+
+
 def _set_missing_values(source, target):
 	address = frappe.get_all(
 		"Dynamic Link",
@@ -523,7 +554,7 @@ def check_credit_limit(customer, company, ignore_outstanding_sales_order=False, 
 		message += "<br><br>"
 
 		# If not authorized person raise exception
-		credit_controller_role = frappe.db.get_single_value("Accounts Settings", "credit_controller")
+		credit_controller_role = frappe.get_single_value("Accounts Settings", "credit_controller")
 		if not credit_controller_role or credit_controller_role not in frappe.get_roles():
 			# form a list of emails for the credit controller users
 			credit_controller_users = get_users_with_role(credit_controller_role or "Sales Master Manager")
@@ -721,6 +752,10 @@ def make_contact(args, is_primary_contact=1):
 		contact.add_email(args.get("email_id"), is_primary=True)
 	if args.get("mobile_no"):
 		contact.add_phone(args.get("mobile_no"), is_primary_mobile_no=True)
+	if args.get("first_name"):
+		contact.first_name = args.get("first_name")
+	if args.get("last_name"):
+		contact.last_name = args.get("last_name")
 
 	if flags := args.get("flags"):
 		contact.insert(ignore_permissions=flags.get("ignore_permissions"))

@@ -3,6 +3,8 @@
 
 frappe.ui.form.on("Asset Repair", {
 	setup: function (frm) {
+		frm.ignore_doctypes_on_cancel_all = ["Serial and Batch Bundle"];
+
 		frm.fields_dict.cost_center.get_query = function (doc) {
 			return {
 				filters: {
@@ -20,14 +22,42 @@ frappe.ui.form.on("Asset Repair", {
 			};
 		};
 
-		frm.fields_dict.warehouse.get_query = function (doc) {
+		frm.set_query("asset", function () {
+			return {
+				filters: {
+					company: frm.doc.company,
+					docstatus: 1,
+				},
+			};
+		});
+
+		frm.set_query("purchase_invoice", "invoices", function () {
+			return {
+				query: "erpnext.assets.doctype.asset_repair.asset_repair.get_purchase_invoice",
+				filters: {
+					company: frm.doc.company,
+				},
+			};
+		});
+
+		frm.set_query("expense_account", "invoices", function (doc, cdt, cdn) {
+			let row = locals[cdt][cdn];
+			return {
+				query: "erpnext.assets.doctype.asset_repair.asset_repair.get_expense_accounts",
+				filters: {
+					purchase_invoice: row.purchase_invoice,
+				},
+			};
+		});
+
+		frm.set_query("warehouse", "stock_items", function () {
 			return {
 				filters: {
 					is_group: 0,
-					company: doc.company,
+					company: frm.doc.company,
 				},
 			};
-		};
+		});
 
 		frm.set_query("serial_and_batch_bundle", "stock_items", (doc, cdt, cdn) => {
 			let row = locals[cdt][cdn];
@@ -79,7 +109,7 @@ frappe.ui.form.on("Asset Repair", {
 			});
 		}
 
-		if (frm.doc.repair_status == "Completed") {
+		if (frm.doc.repair_status == "Completed" && !frm.doc.completion_date) {
 			frm.set_value("completion_date", frappe.datetime.now_datetime());
 		}
 	},
@@ -87,15 +117,48 @@ frappe.ui.form.on("Asset Repair", {
 	stock_items_on_form_rendered() {
 		erpnext.setup_serial_or_batch_no();
 	},
+
+	stock_consumption: function (frm) {
+		if (!frm.doc.stock_consumption) {
+			frm.clear_table("stock_items");
+			frm.refresh_field("stock_items");
+		}
+	},
+
+	purchase_invoice: function (frm) {
+		if (frm.doc.purchase_invoice) {
+			frappe.call({
+				method: "frappe.client.get_value",
+				args: {
+					doctype: "Purchase Invoice",
+					fieldname: "base_net_total",
+					filters: { name: frm.doc.purchase_invoice },
+				},
+				callback: function (r) {
+					if (r.message) {
+						frm.set_value("repair_cost", r.message.base_net_total);
+					}
+				},
+			});
+		} else {
+			frm.set_value("repair_cost", 0);
+		}
+	},
 });
 
 frappe.ui.form.on("Asset Repair Consumed Item", {
-	item_code: function (frm, cdt, cdn) {
+	warehouse: function (frm, cdt, cdn) {
 		var item = locals[cdt][cdn];
+
+		if (!item.item_code) {
+			frappe.msgprint(__("Please select an item code before setting the warehouse."));
+			frappe.model.set_value(cdt, cdn, "warehouse", "");
+			return;
+		}
 
 		let item_args = {
 			item_code: item.item_code,
-			warehouse: frm.doc.warehouse,
+			warehouse: item.warehouse,
 			qty: item.consumed_quantity,
 			serial_no: item.serial_no,
 			company: frm.doc.company,
@@ -115,5 +178,38 @@ frappe.ui.form.on("Asset Repair Consumed Item", {
 	consumed_quantity: function (frm, cdt, cdn) {
 		var row = locals[cdt][cdn];
 		frappe.model.set_value(cdt, cdn, "total_value", row.consumed_quantity * row.valuation_rate);
+	},
+
+	pick_serial_and_batch(frm, cdt, cdn) {
+		let item = locals[cdt][cdn];
+		let doc = frm.doc;
+
+		frappe.db.get_value("Item", item.item_code, ["has_batch_no", "has_serial_no"]).then((r) => {
+			if (r.message && (r.message.has_batch_no || r.message.has_serial_no)) {
+				item.has_serial_no = r.message.has_serial_no;
+				item.has_batch_no = r.message.has_batch_no;
+				item.qty = item.consumed_quantity;
+				item.type_of_transaction = item.consumed_quantity > 0 ? "Outward" : "Inward";
+
+				item.title = item.has_serial_no ? __("Select Serial No") : __("Select Batch No");
+
+				if (item.has_serial_no && item.has_batch_no) {
+					item.title = __("Select Serial and Batch");
+				}
+				frm.doc.posting_date = frappe.datetime.get_today();
+				frm.doc.posting_time = frappe.datetime.now_time();
+
+				new erpnext.SerialBatchPackageSelector(frm, item, (r) => {
+					if (r) {
+						frappe.model.set_value(item.doctype, item.name, {
+							serial_and_batch_bundle: r.name,
+							use_serial_batch_fields: 0,
+							valuation_rate: r.avg_rate,
+							consumed_quantity: Math.abs(r.total_qty),
+						});
+					}
+				});
+			}
+		});
 	},
 });

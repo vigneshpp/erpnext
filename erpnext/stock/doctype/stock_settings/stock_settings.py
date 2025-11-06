@@ -25,38 +25,47 @@ class StockSettings(Document):
 
 		action_if_quality_inspection_is_not_submitted: DF.Literal["Stop", "Warn"]
 		action_if_quality_inspection_is_rejected: DF.Literal["Stop", "Warn"]
+		allow_existing_serial_no: DF.Check
 		allow_from_dn: DF.Check
 		allow_from_pr: DF.Check
+		allow_internal_transfer_at_arms_length_price: DF.Check
 		allow_negative_stock: DF.Check
 		allow_partial_reservation: DF.Check
 		allow_to_edit_stock_uom_qty_for_purchase: DF.Check
 		allow_to_edit_stock_uom_qty_for_sales: DF.Check
+		allow_to_make_quality_inspection_after_purchase_or_delivery: DF.Check
+		allow_uom_with_conversion_rate_defined_in_item: DF.Check
 		auto_create_serial_and_batch_bundle_for_outward: DF.Check
 		auto_indent: DF.Check
 		auto_insert_price_list_rate_if_missing: DF.Check
 		auto_reserve_serial_and_batch: DF.Check
+		auto_reserve_stock: DF.Check
 		auto_reserve_stock_for_sales_order_on_purchase: DF.Check
 		clean_description_html: DF.Check
 		default_warehouse: DF.Link | None
 		disable_serial_no_and_batch_selector: DF.Check
 		do_not_update_serial_batch_on_creation_of_auto_bundle: DF.Check
+		do_not_use_batchwise_valuation: DF.Check
 		enable_stock_reservation: DF.Check
 		item_group: DF.Link | None
 		item_naming_by: DF.Literal["Item Code", "Naming Series"]
 		mr_qty_allowance: DF.Float
 		naming_series_prefix: DF.Data | None
 		over_delivery_receipt_allowance: DF.Float
+		over_picking_allowance: DF.Percent
 		pick_serial_and_batch_based_on: DF.Literal["FIFO", "LIFO", "Expiry"]
 		reorder_email_notify: DF.Check
 		role_allowed_to_create_edit_back_dated_transactions: DF.Link | None
 		role_allowed_to_over_deliver_receive: DF.Link | None
 		sample_retention_warehouse: DF.Link | None
+		set_serial_and_batch_bundle_naming_based_on_naming_series: DF.Check
 		show_barcode_field: DF.Check
 		stock_auth_role: DF.Link | None
 		stock_frozen_upto: DF.Date | None
 		stock_frozen_upto_days: DF.Int
 		stock_uom: DF.Link | None
 		update_existing_price_list_rate: DF.Check
+		update_price_list_based_on: DF.Literal["Rate", "Price List Rate"]
 		use_naming_series: DF.Check
 		use_serial_batch_fields: DF.Check
 		valuation_method: DF.Literal["FIFO", "Moving Average", "LIFO"]
@@ -71,6 +80,7 @@ class StockSettings(Document):
 			"default_warehouse",
 			"set_qty_in_transactions_based_on_serial_no_input",
 			"use_serial_batch_fields",
+			"set_serial_and_batch_bundle_naming_based_on_naming_series",
 		]:
 			frappe.db.set_default(key, self.get(key, ""))
 
@@ -84,14 +94,6 @@ class StockSettings(Document):
 			make_mandatory=0,
 		)
 
-		stock_frozen_limit = 356
-		submitted_stock_frozen = self.stock_frozen_upto_days or 0
-		if submitted_stock_frozen > stock_frozen_limit:
-			self.stock_frozen_upto_days = stock_frozen_limit
-			frappe.msgprint(
-				_("`Freeze Stocks Older Than` should be smaller than %d days.") % stock_frozen_limit
-			)
-
 		# show/hide barcode field
 		for name in ["barcode", "barcodes", "scan_barcode"]:
 			frappe.make_property_setter(
@@ -104,6 +106,7 @@ class StockSettings(Document):
 		self.validate_clean_description_html()
 		self.validate_pending_reposts()
 		self.validate_stock_reservation()
+		self.validate_auto_insert_price_list_rate_if_missing()
 		self.change_precision_for_for_sales()
 		self.change_precision_for_purchase()
 
@@ -119,7 +122,11 @@ class StockSettings(Document):
 				)
 
 	def cant_change_valuation_method(self):
-		previous_valuation_method = self.get_doc_before_save().get("valuation_method")
+		doc_before_save = self.get_doc_before_save()
+		if not doc_before_save:
+			return
+
+		previous_valuation_method = doc_before_save.get("valuation_method")
 
 		if previous_valuation_method and previous_valuation_method != self.valuation_method:
 			# check if there are any stock ledger entries against items
@@ -143,7 +150,7 @@ class StockSettings(Document):
 			# changed to text
 			frappe.enqueue(
 				"erpnext.stock.doctype.stock_settings.stock_settings.clean_all_descriptions",
-				now=frappe.flags.in_test,
+				now=frappe.in_test,
 				enqueue_after_commit=True,
 			)
 
@@ -154,8 +161,11 @@ class StockSettings(Document):
 	def validate_stock_reservation(self):
 		"""Raises an exception if the user tries to enable/disable `Stock Reservation` with `Negative Stock` or `Open Stock Reservation Entries`."""
 
+		if not self.enable_stock_reservation and self.auto_reserve_stock:
+			self.auto_reserve_stock = 0
+
 		# Skip validation for tests
-		if frappe.flags.in_test:
+		if frappe.in_test:
 			return
 
 		# Change in value of `Allow Negative Stock`
@@ -164,7 +174,7 @@ class StockSettings(Document):
 			if self.allow_negative_stock and self.enable_stock_reservation:
 				frappe.throw(
 					_("As {0} is enabled, you can not enable {1}.").format(
-						frappe.bold("Stock Reservation"), frappe.bold("Allow Negative Stock")
+						frappe.bold(_("Stock Reservation")), frappe.bold(_("Allow Negative Stock"))
 					)
 				)
 
@@ -176,7 +186,7 @@ class StockSettings(Document):
 				if self.allow_negative_stock:
 					frappe.throw(
 						_("As {0} is enabled, you can not enable {1}.").format(
-							frappe.bold("Allow Negative Stock"), frappe.bold("Stock Reservation")
+							frappe.bold(_("Allow Negative Stock")), frappe.bold(_("Stock Reservation"))
 						)
 					)
 
@@ -196,7 +206,7 @@ class StockSettings(Document):
 					if bin_with_negative_stock:
 						frappe.throw(
 							_("As there are negative stock, you can not enable {0}.").format(
-								frappe.bold("Stock Reservation")
+								frappe.bold(_("Stock Reservation"))
 							)
 						)
 
@@ -210,9 +220,26 @@ class StockSettings(Document):
 				if has_reserved_stock:
 					frappe.throw(
 						_("As there are reserved stock, you cannot disable {0}.").format(
-							frappe.bold("Stock Reservation")
+							frappe.bold(_("Stock Reservation"))
 						)
 					)
+
+	def validate_auto_insert_price_list_rate_if_missing(self):
+		if (
+			self.auto_insert_price_list_rate_if_missing
+			and self.has_value_changed("auto_insert_price_list_rate_if_missing")
+			and frappe.get_single_value("Selling Settings", "fallback_to_default_price_list")
+		):
+			selling_meta = frappe.get_meta("Selling Settings")
+			frappe.msgprint(
+				_(
+					"You have enabled {0} and {1} in {2}. This can lead to prices from the default price list being inserted in the transaction price list."
+				).format(
+					"<i>{}</i>".format(_(self.meta.get_label("auto_insert_price_list_rate_if_missing"))),
+					"<i>{}</i>".format(_(selling_meta.get_label("fallback_to_default_price_list"))),
+					frappe.bold(_("Selling Settings")),
+				)
+			)
 
 	def on_update(self):
 		self.toggle_warehouse_field_for_inter_warehouse_transfer()

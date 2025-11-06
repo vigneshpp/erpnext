@@ -57,7 +57,6 @@
    "options": "Item",
    "print_width": "100px",
    "read_only": 1,
-   "search_index": 1,
    "width": "100px"
   },
   {
@@ -74,7 +73,8 @@
    "label": "Batch No",
    "oldfieldname": "batch_no",
    "oldfieldtype": "Data",
-   "read_only": 1
+   "read_only": 1,
+   "search_index": 1
   },
   {
    "fieldname": "warehouse",
@@ -88,7 +88,6 @@
    "options": "Warehouse",
    "print_width": "100px",
    "read_only": 1,
-   "search_index": 1,
    "width": "100px"
   },
   {
@@ -123,6 +122,7 @@
    "options": "DocType",
    "print_width": "150px",
    "read_only": 1,
+   "search_index": 1,
    "width": "150px"
   },
   {
@@ -354,13 +354,14 @@
    "label": "Posting Datetime"
   }
  ],
+ "grid_page_length": 50,
  "hide_toolbar": 1,
  "icon": "fa fa-list",
  "idx": 1,
  "in_create": 1,
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2024-03-27 13:10:44.486742",
+ "modified": "2025-10-04 09:59:15.546556",
  "modified_by": "Administrator",
  "module": "Stock",
  "name": "Stock Ledger Entry",
@@ -381,6 +382,7 @@
    "role": "Accounts Manager"
   }
  ],
+ "row_format": "Dynamic",
  "sort_field": "creation",
  "sort_order": "DESC",
  "states": []
