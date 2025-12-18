@@ -593,7 +593,7 @@ class TestPickList(IntegrationTestCase):
 		for dn in frappe.get_all(
 			"Delivery Note",
 			filters={"against_pick_list": pick_list.name, "customer": "_Test Customer"},
-			fields={"name"},
+			fields=["name"],
 		):
 			for dn_item in frappe.get_doc("Delivery Note", dn.name).get("items"):
 				self.assertEqual(dn_item.item_code, "_Test Item")
@@ -604,7 +604,7 @@ class TestPickList(IntegrationTestCase):
 		for dn in frappe.get_all(
 			"Delivery Note",
 			filters={"against_pick_list": pick_list.name, "customer": "_Test Customer 1"},
-			fields={"name"},
+			fields=["name"],
 		):
 			for dn_item in frappe.get_doc("Delivery Note", dn.name).get("items"):
 				self.assertEqual(dn_item.item_code, "_Test Item 2")
@@ -637,13 +637,53 @@ class TestPickList(IntegrationTestCase):
 		pick_list_1.submit()
 		create_delivery_note(pick_list_1.name)
 		for dn in frappe.get_all(
-			"Delivery Note", filters={"against_pick_list": pick_list_1.name}, fields={"name"}
+			"Delivery Note", filters={"against_pick_list": pick_list_1.name}, fields=["name"]
 		):
 			for dn_item in frappe.get_doc("Delivery Note", dn.name).get("items"):
 				if dn_item.item_code == "_Test Item":
 					self.assertEqual(dn_item.qty, 1)
 				if dn_item.item_code == "_Test Item 2":
 					self.assertEqual(dn_item.qty, 2)
+
+	def test_picklist_reserved_qty_validation(self):
+		from erpnext.selling.doctype.sales_order.test_sales_order import make_sales_order
+
+		warehouse = "_Test Warehouse - _TC"
+		test_stock_item = "_Test Stock Item"
+
+		# Ensure stock item exists
+		if not frappe.db.exists("Item", test_stock_item):
+			create_item(
+				item_code=test_stock_item,
+				is_stock_item=1,
+			)
+
+		# Add initial stock qty
+		make_stock_entry(item_code=test_stock_item, to_warehouse=warehouse, qty=15)
+
+		# Create SO for 10 qty
+		sales_order_1 = make_sales_order(item_code=test_stock_item, warehouse=warehouse, qty=10)
+
+		# Create and Submit picklist for SO
+		picklist_1 = create_pick_list(sales_order_1.name)
+		picklist_1.submit()
+
+		# Create DN for 5 qty
+		dn = create_delivery_note(picklist_1.name)
+		dn.items[0].qty = 5
+		dn.save()
+		dn.submit()
+
+		# Verify partly delivered state
+		picklist_1.reload()
+		self.assertEqual(picklist_1.status, "Partly Delivered")
+
+		# Create another SO (10 qty)
+		sales_order_2 = make_sales_order(item_code=test_stock_item, warehouse=warehouse, qty=10)
+
+		# Expected pick qty = 5
+		picklist_2 = create_pick_list(sales_order_2.name)
+		self.assertEqual(picklist_2.locations[0].qty, 5)
 
 	def test_picklist_with_multi_uom(self):
 		warehouse = "_Test Warehouse - _TC"

@@ -1,12 +1,11 @@
 # Copyright (c) 2015, Frappe Technologies Pvt. Ltd. and Contributors
 # License: GNU General Public License v3. See license.txt
-import unittest
 
 import frappe
 from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, getdate, nowdate
 
-from erpnext.projects.doctype.task.task import CircularReferenceError
+from erpnext.projects.doctype.task.task import CircularReferenceError, ParentIsGroupError
 from erpnext.tests.utils import ERPNextTestSuite
 
 
@@ -15,6 +14,32 @@ class TestTask(ERPNextTestSuite):
 	def setUpClass(cls):
 		super().setUpClass()
 		cls.make_projects()
+
+	def test_task_total_costing_and_billing_amount(self):
+		from erpnext.projects.doctype.project.test_project import make_project
+		from erpnext.projects.doctype.timesheet.test_timesheet import make_timesheet
+		from erpnext.setup.doctype.employee.test_employee import make_employee
+
+		project_name = "Test Project Costing"
+		employee = make_employee("employee@frappe.io")
+		project = make_project({"project_name": project_name})
+		task = create_task("_Test Task 1")
+		task.project = project.name
+		task.save()
+		timesheet = make_timesheet(
+			employee=employee,
+			is_billable=1,
+			currency="USD",
+			project=project.name,
+			simulate=True,
+			exchange_rate=80,
+			task=task.name,
+		)
+		timesheet.reload()
+		project.reload()
+		task.reload()
+		self.assertEqual(task.total_costing_amount, 3200)
+		self.assertEqual(task.total_billing_amount, 8000)
 
 	def test_circular_reference(self):
 		task1 = create_task("_Test Task 1", add_days(nowdate(), -15), add_days(nowdate(), -10))
@@ -118,6 +143,20 @@ class TestTask(ERPNextTestSuite):
 		set_tasks_as_overdue()
 
 		self.assertEqual(frappe.db.get_value("Task", task.name, "status"), "Overdue")
+
+	def test_parent_task_must_be_group(self):
+		parent_task = create_task(
+			subject="_Test Parent Task Non Group",
+			is_group=0,
+		)
+
+		child_task = create_task(
+			subject="_Test Child Task",
+			parent_task=parent_task.name,
+			save=False,
+		)
+
+		self.assertRaises(ParentIsGroupError, child_task.save)
 
 
 def create_task(

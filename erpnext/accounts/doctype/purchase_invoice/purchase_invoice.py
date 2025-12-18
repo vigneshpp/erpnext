@@ -62,6 +62,7 @@ class PurchaseInvoice(BuyingController):
 		from frappe.types import DF
 
 		from erpnext.accounts.doctype.advance_tax.advance_tax import AdvanceTax
+		from erpnext.accounts.doctype.item_wise_tax_detail.item_wise_tax_detail import ItemWiseTaxDetail
 		from erpnext.accounts.doctype.payment_schedule.payment_schedule import PaymentSchedule
 		from erpnext.accounts.doctype.pricing_rule_detail.pricing_rule_detail import PricingRuleDetail
 		from erpnext.accounts.doctype.purchase_invoice_advance.purchase_invoice_advance import (
@@ -136,6 +137,7 @@ class PurchaseInvoice(BuyingController):
 		is_paid: DF.Check
 		is_return: DF.Check
 		is_subcontracted: DF.Check
+		item_wise_tax_details: DF.Table[ItemWiseTaxDetail]
 		items: DF.Table[PurchaseInvoiceItem]
 		language: DF.Data | None
 		letter_head: DF.Link | None
@@ -2025,6 +2027,7 @@ def get_list_context(context=None):
 			"show_search": True,
 			"no_breadcrumbs": True,
 			"title": _("Purchase Invoices"),
+			"list_template": "templates/includes/list/list.html",
 		}
 	)
 	return list_context
@@ -2095,10 +2098,26 @@ def make_purchase_receipt(source_name, target_doc=None, args=None):
 	if isinstance(args, str):
 		args = json.loads(args)
 
+	def post_parent_process(source_parent, target_parent):
+		for row in target_parent.get("items"):
+			if row.get("qty") == 0:
+				target_parent.remove(row)
+
 	def update_item(obj, target, source_parent):
-		target.qty = flt(obj.qty) - flt(obj.received_qty)
+		from erpnext.controllers.sales_and_purchase_return import get_returned_qty_map_for_row
+
+		returned_qty_map = (
+			get_returned_qty_map_for_row(
+				source_parent.name, source_parent.supplier, obj.name, "Purchase Invoice"
+			)
+			or {}
+		)
+
+		target.qty = flt(obj.qty) - flt(obj.received_qty) - flt(returned_qty_map.get("qty"))
 		target.received_qty = flt(obj.qty) - flt(obj.received_qty)
-		target.stock_qty = (flt(obj.qty) - flt(obj.received_qty)) * flt(obj.conversion_factor)
+		target.stock_qty = (flt(obj.qty) - flt(obj.received_qty) - flt(returned_qty_map.get("qty"))) * flt(
+			obj.conversion_factor
+		)
 		target.amount = (flt(obj.qty) - flt(obj.received_qty)) * flt(obj.rate)
 		target.base_amount = (
 			(flt(obj.qty) - flt(obj.received_qty)) * flt(obj.rate) * flt(source_parent.conversion_rate)
@@ -2137,6 +2156,7 @@ def make_purchase_receipt(source_name, target_doc=None, args=None):
 			"Purchase Taxes and Charges": {"doctype": "Purchase Taxes and Charges"},
 		},
 		target_doc,
+		post_parent_process,
 	)
 
 	return doc

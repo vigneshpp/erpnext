@@ -198,7 +198,7 @@ frappe.ui.form.on("Asset", {
 					callback: function (r) {
 						if (!r.message) {
 							$(".primary-action").prop("hidden", true);
-							$(".form-message").text("Capitalize this asset to confirm");
+							$(".form-message").text(__("Capitalize this asset to confirm"));
 
 							frm.add_custom_button(__("Capitalize Asset"), function () {
 								frm.trigger("create_asset_capitalization");
@@ -270,8 +270,14 @@ frappe.ui.form.on("Asset", {
 			const row = [
 				sch["idx"],
 				frappe.format(sch["schedule_date"], { fieldtype: "Date" }),
-				frappe.format(sch["depreciation_amount"], { fieldtype: "Currency" }),
-				frappe.format(sch["accumulated_depreciation_amount"], { fieldtype: "Currency" }),
+				frappe.format(sch["depreciation_amount"], {
+					fieldtype: "Currency",
+					options: "Company:company:default_currency",
+				}),
+				frappe.format(sch["accumulated_depreciation_amount"], {
+					fieldtype: "Currency",
+					options: "Company:company:default_currency",
+				}),
 				sch["journal_entry"] || "",
 			];
 

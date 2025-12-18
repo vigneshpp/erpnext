@@ -94,6 +94,7 @@ status_map = {
 		["To Bill", "eval:self.per_billed < 100 and self.docstatus == 1"],
 		["Completed", "eval:self.per_billed == 100 and self.docstatus == 1"],
 		["Return Issued", "eval:self.per_returned == 100 and self.docstatus == 1"],
+		["Return", "eval:self.is_return == 1 and self.per_billed == 0 and self.docstatus == 1"],
 		["Cancelled", "eval:self.docstatus==2"],
 		["Closed", "eval:self.status=='Closed' and self.docstatus != 2"],
 	],
@@ -101,6 +102,7 @@ status_map = {
 		["Draft", None],
 		["To Bill", "eval:self.per_billed == 0 and self.docstatus == 1"],
 		["Partly Billed", "eval:self.per_billed > 0 and self.per_billed < 100 and self.docstatus == 1"],
+		["Return", "eval:self.is_return == 1 and self.per_billed == 0 and self.docstatus == 1"],
 		["Return Issued", "eval:self.per_returned == 100 and self.docstatus == 1"],
 		[
 			"Completed",
@@ -128,7 +130,7 @@ status_map = {
 		],
 		[
 			"Received",
-			"eval:self.status != 'Stopped' and self.per_received == 100 and self.docstatus == 1 and self.material_request_type == 'Purchase'",
+			"eval:self.status != 'Stopped' and self.docstatus == 1 and ((self.per_received == 100 and self.material_request_type == 'Purchase') or (self.per_ordered == 100 and self.material_request_type == 'Customer Provided'))",
 		],
 		[
 			"Partially Received",
@@ -136,11 +138,11 @@ status_map = {
 		],
 		[
 			"Partially Received",
-			"eval:self.status != 'Stopped' and self.per_ordered < 100 and self.per_ordered > 0 and self.docstatus == 1 and self.material_request_type == 'Material Transfer'",
+			"eval:self.status != 'Stopped' and self.per_ordered < 100 and self.per_ordered > 0 and self.docstatus == 1 and self.material_request_type in ['Material Transfer', 'Customer Provided']",
 		],
 		[
 			"Partially Ordered",
-			"eval:self.status != 'Stopped' and self.per_ordered < 100 and self.per_ordered > 0 and self.docstatus == 1 and self.material_request_type != 'Material Transfer'",
+			"eval:self.status != 'Stopped' and self.per_ordered < 100 and self.per_ordered > 0 and self.docstatus == 1 and self.material_request_type not in ['Material Transfer', 'Customer Provided']",
 		],
 	],
 	"POS Opening Entry": [
@@ -562,11 +564,14 @@ class StatusUpdater(Document):
 			fields=[target_ref_field, target_field],
 		)
 
-		sum_ref = sum(abs(record[target_ref_field]) for record in child_records)
+		# For operator dicts, the alias is in the "as" key; for strings, use the field name directly
+		ref_key = target_ref_field.get("as") if isinstance(target_ref_field, dict) else target_ref_field
+
+		sum_ref = sum(abs(record[ref_key]) for record in child_records)
 
 		if sum_ref > 0:
 			percentage = round(
-				sum(min(abs(record[target_field]), abs(record[target_ref_field])) for record in child_records)
+				sum(min(abs(record[target_field]), abs(record[ref_key])) for record in child_records)
 				/ sum_ref
 				* 100,
 				6,

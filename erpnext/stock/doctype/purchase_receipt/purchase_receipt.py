@@ -8,7 +8,7 @@ import frappe
 from frappe import _, throw
 from frappe.desk.notifications import clear_doctype_notifications
 from frappe.model.mapper import get_mapped_doc
-from frappe.query_builder.functions import CombineDatetime
+from frappe.query_builder.functions import Abs, CombineDatetime, Sum
 from frappe.utils import cint, flt, get_datetime, getdate, nowdate
 from pypika import functions as fn
 
@@ -20,6 +20,11 @@ from erpnext.controllers.accounts_controller import merge_taxes
 from erpnext.controllers.buying_controller import BuyingController
 from erpnext.stock.doctype.delivery_note.delivery_note import make_inter_company_transaction
 from erpnext.stock.doctype.stock_reservation_entry.stock_reservation_entry import StockReservation
+from erpnext.stock.serial_batch_bundle import (
+	SerialBatchCreation,
+	get_batches_from_bundle,
+	get_serial_nos_from_bundle,
+)
 
 form_grid_templates = {"items": "templates/form_grid/item_grid.html"}
 
@@ -33,6 +38,7 @@ class PurchaseReceipt(BuyingController):
 	if TYPE_CHECKING:
 		from frappe.types import DF
 
+		from erpnext.accounts.doctype.item_wise_tax_detail.item_wise_tax_detail import ItemWiseTaxDetail
 		from erpnext.accounts.doctype.pricing_rule_detail.pricing_rule_detail import PricingRuleDetail
 		from erpnext.accounts.doctype.purchase_taxes_and_charges.purchase_taxes_and_charges import (
 			PurchaseTaxesandCharges,
@@ -85,6 +91,7 @@ class PurchaseReceipt(BuyingController):
 		is_old_subcontracting_flow: DF.Check
 		is_return: DF.Check
 		is_subcontracted: DF.Check
+		item_wise_tax_details: DF.Table[ItemWiseTaxDetail]
 		items: DF.Table[PurchaseReceiptItem]
 		language: DF.Data | None
 		letter_head: DF.Link | None
@@ -118,7 +125,15 @@ class PurchaseReceipt(BuyingController):
 		shipping_address_display: DF.TextEditor | None
 		shipping_rule: DF.Link | None
 		status: DF.Literal[
-			"", "Draft", "Partly Billed", "To Bill", "Completed", "Return Issued", "Cancelled", "Closed"
+			"",
+			"Draft",
+			"Partly Billed",
+			"To Bill",
+			"Completed",
+			"Return",
+			"Return Issued",
+			"Cancelled",
+			"Closed",
 		]
 		subcontracting_receipt: DF.Link | None
 		supplied_items: DF.Table[PurchaseReceiptItemSupplied]
@@ -1323,7 +1338,7 @@ def get_item_wise_returned_qty(pr_doc):
 			"Purchase Receipt",
 			fields=[
 				"`tabPurchase Receipt Item`.purchase_receipt_item",
-				"sum(abs(`tabPurchase Receipt Item`.qty)) as qty",
+				{"SUM": [{"ABS": "`tabPurchase Receipt Item`.qty"}], "as": "qty"},
 			],
 			filters=[
 				["Purchase Receipt", "docstatus", "=", 1],
@@ -1359,7 +1374,7 @@ def make_purchase_invoice(source_name, target_doc=None, args=None):
 		doc.run_method("set_missing_values")
 
 		if args and args.get("merge_taxes"):
-			merge_taxes(source.get("taxes") or [], doc)
+			merge_taxes(source, doc)
 
 		doc.run_method("calculate_taxes_and_totals")
 		doc.set_payment_schedule()
@@ -1372,6 +1387,7 @@ def make_purchase_invoice(source_name, target_doc=None, args=None):
 			target_doc.conversion_factor, target_doc.precision("conversion_factor")
 		)
 		returned_qty_map[source_doc.name] = returned_qty
+		target_doc._old_name = source_doc.name
 
 	def get_pending_qty(item_row):
 		qty = item_row.qty
@@ -1466,21 +1482,26 @@ def get_invoiced_qty_map(purchase_receipt):
 
 
 def get_returned_qty_map(purchase_receipt):
-	"""returns a map: {so_detail: returned_qty}"""
-	returned_qty_map = frappe._dict(
-		frappe.db.sql(
-			"""select pr_item.purchase_receipt_item, abs(pr_item.qty) as qty
-		from `tabPurchase Receipt Item` pr_item, `tabPurchase Receipt` pr
-		where pr.name = pr_item.parent
-			and pr.docstatus = 1
-			and pr.is_return = 1
-			and pr.return_against = %s
-	""",
-			purchase_receipt,
-		)
-	)
+	"""returns a map: {pr_detail: returned_qty}"""
 
-	return returned_qty_map
+	pr = frappe.qb.DocType("Purchase Receipt")
+	pr_item = frappe.qb.DocType("Purchase Receipt Item")
+
+	query = (
+		frappe.qb.from_(pr)
+		.inner_join(pr_item)
+		.on(pr.name == pr_item.parent)
+		.select(pr_item.purchase_receipt_item, Sum(Abs(pr_item.qty)).as_("qty"))
+		.where(
+			(pr.docstatus == 1)
+			& (pr.is_return == 1)
+			& (pr.return_against == purchase_receipt)
+			& (pr_item.purchase_receipt_item.isnotnull())
+		)
+		.groupby(pr_item.purchase_receipt_item)
+	).run(as_list=1)
+
+	return frappe._dict(query) if query else frappe._dict()
 
 
 @frappe.whitelist()
@@ -1510,6 +1531,35 @@ def make_stock_entry(source_name, target_doc=None):
 		target.purpose = "Material Transfer"
 		target.set_missing_values()
 
+	def update_item(source_doc, target_doc, source_parent):
+		if source_doc.serial_and_batch_bundle:
+			serial_nos = get_serial_nos_from_bundle(source_doc.serial_and_batch_bundle)
+			if serial_nos:
+				serial_nos = "\n".join(serial_nos)
+
+			batches = get_batches_from_bundle(source_doc.serial_and_batch_bundle)
+			if batches:
+				if len(batches) == 1:
+					target_doc.use_serial_batch_fields = 1
+					target_doc.batch_no = next(iter(batches))
+				elif not serial_nos:
+					cls_obj = SerialBatchCreation(
+						{
+							"type_of_transaction": "Outward",
+							"serial_and_batch_bundle": source_doc.serial_and_batch_bundle,
+							"item_code": source_doc.item_code,
+							"warehouse": source_doc.warehouse,
+						}
+					)
+
+					cls_obj.duplicate_package()
+
+					target_doc.serial_and_batch_bundle = cls_obj.serial_and_batch_bundle
+
+			if serial_nos:
+				target_doc.use_serial_batch_fields = 1
+				target_doc.serial_no = serial_nos
+
 	doclist = get_mapped_doc(
 		"Purchase Receipt",
 		source_name,
@@ -1524,6 +1574,7 @@ def make_stock_entry(source_name, target_doc=None):
 					"parent": "reference_purchase_receipt",
 					"batch_no": "batch_no",
 				},
+				"postprocess": update_item,
 			},
 		},
 		target_doc,

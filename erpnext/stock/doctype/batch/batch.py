@@ -166,7 +166,9 @@ class Batch(Document):
 			for row in batches:
 				batch_qty += row.get("qty")
 
-		self.db_set("batch_qty", batch_qty)
+		if self.batch_qty != batch_qty:
+			self.db_set("batch_qty", batch_qty)
+
 		frappe.msgprint(_("Batch Qty updated to {0}").format(batch_qty), alert=True)
 
 	def set_batchwise_valuation(self):
@@ -405,8 +407,9 @@ def get_batches(item_code, warehouse, qty=1, throw=False, serial_no=None):
 		serial_nos = get_serial_nos(serial_no)
 		batches = frappe.get_all(
 			"Serial No",
-			fields=["distinct batch_no"],
+			fields=["batch_no"],
 			filters={"item_code": item_code, "warehouse": warehouse, "name": ("in", serial_nos)},
+			distinct=True,
 		)
 
 		if not batches:
