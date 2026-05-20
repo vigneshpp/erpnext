@@ -191,7 +191,7 @@ def auto_fetch_serial_number(
 	posting_date: str | None = None,
 	batch_nos: str | list[str] | None = None,
 	for_doctype: str | None = None,
-	exclude_sr_nos=None,
+	exclude_sr_nos: str | None = None,
 ) -> list[str]:
 	filters = frappe._dict({"item_code": item_code, "warehouse": warehouse})
 
@@ -221,7 +221,7 @@ def auto_fetch_serial_number(
 
 
 @frappe.whitelist()
-def get_pos_reserved_serial_nos(filters):
+def get_pos_reserved_serial_nos(filters: str | dict):
 	if isinstance(filters, str):
 		filters = json.loads(filters)
 
@@ -304,3 +304,7 @@ def get_serial_nos_for_outward(kwargs):
 		return []
 
 	return [d.serial_no for d in serial_nos]
+
+
+def on_doctype_update():
+	frappe.db.add_index("Serial No", ["item_code", "warehouse"])

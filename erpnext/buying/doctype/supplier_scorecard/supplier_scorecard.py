@@ -146,7 +146,7 @@ class SupplierScorecard(Document):
 
 
 @frappe.whitelist()
-def get_timeline_data(doctype, name):
+def get_timeline_data(doctype: str, name: str):
 	# Get a list of all the associated scorecards
 	scs = frappe.get_doc(doctype, name)
 	out = {}
@@ -181,24 +181,19 @@ def daterange(start_date, end_date):
 
 
 def refresh_scorecards():
-	scorecards = frappe.db.sql(
-		"""
-		SELECT
-			sc.name
-		FROM
-			`tabSupplier Scorecard` sc""",
-		{},
-		as_dict=1,
-	)
-	for sc in scorecards:
+	"""
+	Refresh the scorecards
+	"""
+	scorecards = frappe.get_list("Supplier Scorecard", fields=["name"], pluck="name", limit_page_length=0)
+	for sc_name in scorecards:
 		# Check to see if any new scorecard periods are created
-		if make_all_scorecards(sc.name) > 0:
+		if make_all_scorecards(sc_name) > 0:
 			# Save the scorecard to update the score and standings
-			frappe.get_doc("Supplier Scorecard", sc.name).save()
+			frappe.get_doc("Supplier Scorecard", sc_name).save()
 
 
 @frappe.whitelist()
-def make_all_scorecards(docname):
+def make_all_scorecards(docname: str):
 	sc = frappe.get_doc("Supplier Scorecard", docname)
 	supplier = frappe.get_doc("Supplier", sc.supplier)
 
@@ -266,8 +261,8 @@ def get_scorecard_date(period, start_date):
 	return end_date
 
 
-def make_default_records():
-	install_variable_docs = [
+def get_default_scorecard_variables():
+	return [
 		{
 			"param_name": "total_accepted_items",
 			"variable_label": "Total Accepted Items",
@@ -374,7 +369,10 @@ def make_default_records():
 			"path": "get_invoiced_qty",
 		},
 	]
-	install_standing_docs = [
+
+
+def get_default_scorecard_standing():
+	return [
 		{
 			"min_grade": 0.0,
 			"prevent_rfqs": 1,
@@ -425,12 +423,17 @@ def make_default_records():
 		},
 	]
 
+
+def make_default_records():
+	install_variable_docs = get_default_scorecard_variables()
 	for d in install_variable_docs:
 		try:
 			d["doctype"] = "Supplier Scorecard Variable"
 			frappe.get_doc(d).insert()
 		except frappe.NameError:
 			pass
+
+	install_standing_docs = get_default_scorecard_standing()
 	for d in install_standing_docs:
 		try:
 			d["doctype"] = "Supplier Scorecard Standing"

@@ -2,6 +2,7 @@
 # License: GNU General Public License v3. See license.txt
 
 
+import datetime
 from collections import OrderedDict, defaultdict
 
 import frappe
@@ -10,7 +11,7 @@ from frappe.model.document import Document
 from frappe.model.naming import make_autoname, revert_series_if_last
 from frappe.query_builder.functions import CurDate, Sum
 from frappe.utils import cint, flt, get_link_to_form
-from frappe.utils.data import add_days
+from frappe.utils.data import DateTimeLikeObject, add_days
 from frappe.utils.jinja import render_template
 
 
@@ -159,8 +160,13 @@ class Batch(Document):
 	@frappe.whitelist()
 	def recalculate_batch_qty(self):
 		batches = get_batch_qty(
-			batch_no=self.name, item_code=self.item, for_stock_levels=True, consider_negative_batches=True
+			batch_no=self.name,
+			item_code=self.item,
+			for_stock_levels=True,
+			consider_negative_batches=True,
+			ignore_reserved_stock=True,
 		)
+
 		batch_qty = 0.0
 		if batches:
 			for row in batches:
@@ -230,17 +236,18 @@ class Batch(Document):
 
 @frappe.whitelist()
 def get_batch_qty(
-	batch_no=None,
-	warehouse=None,
-	item_code=None,
-	creation=None,
-	posting_datetime=None,
-	posting_date=None,
-	posting_time=None,
-	ignore_voucher_nos=None,
-	for_stock_levels=False,
-	consider_negative_batches=False,
-	do_not_check_future_batches=False,
+	batch_no: str | None = None,
+	warehouse: str | None = None,
+	item_code: str | None = None,
+	creation: DateTimeLikeObject | None = None,
+	posting_datetime: DateTimeLikeObject | None = None,
+	posting_date: DateTimeLikeObject | None = None,
+	posting_time: datetime.timedelta | None = None,
+	ignore_voucher_nos: list | None = None,
+	for_stock_levels: bool = False,
+	consider_negative_batches: bool = False,
+	do_not_check_future_batches: bool = False,
+	ignore_reserved_stock: bool = False,
 ):
 	"""Returns batch actual qty if warehouse is passed,
 	        or returns dict of qty by warehouse if warehouse is None
@@ -269,6 +276,7 @@ def get_batch_qty(
 			"for_stock_levels": for_stock_levels,
 			"consider_negative_batches": consider_negative_batches,
 			"do_not_check_future_batches": do_not_check_future_batches,
+			"ignore_reserved_stock": ignore_reserved_stock,
 		}
 	)
 
@@ -288,7 +296,7 @@ def get_batch_qty(
 
 
 @frappe.whitelist()
-def get_batches_by_oldest(item_code, warehouse):
+def get_batches_by_oldest(item_code: str, warehouse: str):
 	"""Returns the oldest batch and qty for the given item_code and warehouse"""
 	batches = get_batch_qty(item_code=item_code, warehouse=warehouse)
 	batches_dates = [[batch, frappe.get_value("Batch", batch.batch_no, "expiry_date")] for batch in batches]
@@ -299,7 +307,7 @@ def get_batches_by_oldest(item_code, warehouse):
 @frappe.whitelist()
 def split_batch(batch_no: str, item_code: str, warehouse: str, qty: float, new_batch_id: str | None = None):
 	"""Split the batch into a new batch"""
-	batch = frappe.get_doc(dict(doctype="Batch", item=item_code, batch_id=new_batch_id)).insert()
+	batch = frappe.get_doc(doctype="Batch", item=item_code, batch_id=new_batch_id).insert()
 	qty = flt(qty)
 
 	company = frappe.db.get_value("Warehouse", warehouse, "company")
@@ -323,22 +331,18 @@ def split_batch(batch_no: str, item_code: str, warehouse: str, qty: float, new_b
 	)
 
 	stock_entry = frappe.get_doc(
-		dict(
-			doctype="Stock Entry",
-			purpose="Repack",
-			company=company,
-			items=[
-				dict(
-					item_code=item_code,
-					qty=qty,
-					s_warehouse=warehouse,
-					serial_and_batch_bundle=from_bundle_id,
-				),
-				dict(
-					item_code=item_code, qty=qty, t_warehouse=warehouse, serial_and_batch_bundle=to_bundle_id
-				),
-			],
-		)
+		doctype="Stock Entry",
+		purpose="Repack",
+		company=company,
+		items=[
+			dict(
+				item_code=item_code,
+				qty=qty,
+				s_warehouse=warehouse,
+				serial_and_batch_bundle=from_bundle_id,
+			),
+			dict(item_code=item_code, qty=qty, t_warehouse=warehouse, serial_and_batch_bundle=to_bundle_id),
+		],
 	)
 	stock_entry.set_stock_entry_type()
 	stock_entry.insert()
@@ -444,7 +448,7 @@ def make_batch(kwargs):
 
 
 @frappe.whitelist()
-def get_pos_reserved_batch_qty(filters):
+def get_pos_reserved_batch_qty(filters: dict | str):
 	import json
 
 	if isinstance(filters, str):
