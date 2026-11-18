@@ -1,9 +1,8 @@
-import { in_list } from "./checks";
 import { getCurrencyNumberFormat, getCurrencyProperty, getCurrencySymbol } from "./currency";
 import { getSystemDefault } from "./frappe";
 import _ from "@/lib/translate";
 
-export const formatCurrency = (value?: number, currency: string = '', decimals: number = 2) => {
+export const formatCurrency = (value?: number, currency: string = '', decimals?: number) => {
 
     if (!value) {
         value = 0
@@ -18,7 +17,7 @@ export const formatCurrency = (value?: number, currency: string = '', decimals: 
     const show_symbol_on_right = getCurrencyProperty(currency, 'symbol_on_right') ?? false;
 
     if (decimals === undefined) {
-        decimals = getSystemDefault('currency_precision') || null;
+        decimals = getCurrencyPrecision(currency);
     }
 
     if (symbol) {
@@ -30,6 +29,13 @@ export const formatCurrency = (value?: number, currency: string = '', decimals: 
         return format_number(value, format, decimals);
     }
 }
+
+export const getCurrencyPrecision = (currency?: string) => {
+    return cint(
+        getSystemDefault('currency_precision'),
+        getCurrencyFormatInfo(currency || getSystemDefault('currency')).precision
+    );
+};
 
 const replace_all = (str: string, search: string, replace: string) => {
     return str.split(search).join(replace);
@@ -110,7 +116,7 @@ function get_number_format_info(format: string) {
     }
 
     // get the precision from the number format
-    info.precision = format.split(info.decimal_str).slice(1)[0].length;
+    info.precision = info.decimal_str ? format.split(info.decimal_str)[1]?.length ?? 0 : 0;
 
     return info;
 }

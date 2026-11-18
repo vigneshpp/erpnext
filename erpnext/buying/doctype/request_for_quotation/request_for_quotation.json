@@ -3,8 +3,10 @@
  "allow_import": 1,
  "autoname": "naming_series:",
  "creation": "2016-02-25 01:24:07.224790",
+ "description": "Ask suppliers for prices on the items you need.",
  "doctype": "DocType",
  "document_type": "Document",
+ "documentation": "https://docs.frappe.io/erpnext/user/manual/en/request-for-quotation",
  "engine": "InnoDB",
  "field_order": [
   "naming_series",
@@ -16,8 +18,6 @@
   "status",
   "has_unit_price_items",
   "amended_from",
-  "section_break_trpf",
-  "title",
   "suppliers_section",
   "suppliers",
   "items_section",
@@ -44,6 +44,7 @@
   "letter_head",
   "more_info",
   "opportunity",
+  "title",
   "address_and_contact_tab",
   "billing_address",
   "billing_address_display",
@@ -375,10 +376,6 @@
    "read_only": 1
   },
   {
-   "fieldname": "section_break_trpf",
-   "fieldtype": "Section Break"
-  },
-  {
    "allow_on_submit": 1,
    "fieldname": "title",
    "fieldtype": "Data",
@@ -388,11 +385,11 @@
   }
  ],
  "grid_page_length": 50,
- "icon": "fa fa-shopping-cart",
+ "icon": "file-question-mark",
  "index_web_pages_for_search": 1,
  "is_submittable": 1,
  "links": [],
- "modified": "2026-03-30 12:18:08.451201",
+ "modified": "2026-05-28 12:28:46.606963",
  "modified_by": "Administrator",
  "module": "Buying",
  "name": "Request for Quotation",

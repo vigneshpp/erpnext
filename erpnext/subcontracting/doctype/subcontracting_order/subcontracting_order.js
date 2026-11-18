@@ -101,10 +101,9 @@ frappe.ui.form.on("Subcontracting Order", {
 		frm.set_query("bom", "items", (doc, cdt, cdn) => {
 			let d = locals[cdt][cdn];
 			return {
+				query: "erpnext.subcontracting.doctype.subcontracting_bom.subcontracting_bom.finished_good_bom_query",
 				filters: {
-					item: d.item_code,
-					is_active: 1,
-					docstatus: 1,
+					finished_good: d.item_code,
 					company: frm.doc.company,
 				},
 			};
@@ -127,9 +126,7 @@ frappe.ui.form.on("Subcontracting Order", {
 
 		frm.set_query("billing_address", erpnext.queries.company_address_query);
 
-		frm.set_query("shipping_address", () => {
-			return erpnext.queries.company_address_query(frm.doc);
-		});
+		frm.set_query("shipping_address", erpnext.queries.company_address_query);
 	},
 
 	onload: (frm) => {
@@ -145,9 +142,9 @@ frappe.ui.form.on("Subcontracting Order", {
 
 		if (frm.doc.purchase_order) {
 			erpnext.utils.map_current_doc({
-				method: "erpnext.buying.doctype.purchase_order.purchase_order.make_subcontracting_order",
+				method: "erpnext.buying.doctype.purchase_order.mapper.make_subcontracting_order",
 				source_name: frm.doc.purchase_order,
-				target_doc: frm,
+				target: frm,
 				freeze: true,
 				freeze_message: __("Mapping Subcontracting Order ..."),
 			});
@@ -304,7 +301,7 @@ frappe.ui.form.on("Subcontracting Order", {
 
 		frm.doc.supplied_items.forEach((item) => {
 			let unreserved_qty =
-				flt(item.required_qty) - flt(item.supplied_qty) - flt(item.stock_reserved_qty);
+				flt(item.required_qty) - flt(item.total_supplied_qty) - flt(item.stock_reserved_qty);
 
 			if (unreserved_qty > 0) {
 				dialog.fields_dict.items.df.data.push({
@@ -577,7 +574,7 @@ frappe.ui.form.on("Subcontracting Order", {
 	},
 
 	get_materials_from_supplier: function (frm) {
-		let sco_rm_details = [];
+		const sco_rm_details = [];
 
 		if (frm.doc.status != "Closed" && frm.doc.supplied_items) {
 			frm.doc.supplied_items.forEach((d) => {
@@ -591,21 +588,16 @@ frappe.ui.form.on("Subcontracting Order", {
 			frm.add_custom_button(
 				__("Return of Components"),
 				() => {
-					frm.call({
+					frappe.model.open_mapped_doc({
 						method: "erpnext.controllers.subcontracting_controller.get_materials_from_supplier",
-						freeze: true,
-						freeze_message: __("Creating Stock Entry"),
+						frm: frm,
 						args: {
 							subcontract_order: frm.doc.name,
 							rm_details: sco_rm_details,
-							order_doctype: cur_frm.doc.doctype,
+							order_doctype: frm.doc.doctype,
 						},
-						callback: function (r) {
-							if (r && r.message) {
-								const doc = frappe.model.sync(r.message);
-								frappe.set_route("Form", doc[0].doctype, doc[0].name);
-							}
-						},
+						freeze: true,
+						freeze_message: __("Creating Return of Components ..."),
 					});
 				},
 				__("Create")
@@ -646,7 +638,7 @@ erpnext.buying.SubcontractingOrderController = class SubcontractingOrderControll
 					if (me.has_unsupplied_items()) {
 						this.frm.add_custom_button(
 							__("Material to Supplier"),
-							this.make_stock_entry,
+							() => this.make_stock_entry(),
 							__("Transfer")
 						);
 					}
@@ -691,7 +683,7 @@ erpnext.buying.SubcontractingOrderController = class SubcontractingOrderControll
 	make_subcontracting_receipt(items) {
 		frappe.model.open_mapped_doc({
 			method: "erpnext.subcontracting.doctype.subcontracting_order.subcontracting_order.make_subcontracting_receipt",
-			frm: cur_frm,
+			frm: this.frm,
 			args: { items: items || [] },
 			freeze: true,
 			freeze_message: __("Creating Subcontracting Receipt ..."),
@@ -702,8 +694,8 @@ erpnext.buying.SubcontractingOrderController = class SubcontractingOrderControll
 		frappe.call({
 			method: "erpnext.controllers.subcontracting_controller.make_rm_stock_entry",
 			args: {
-				subcontract_order: cur_frm.doc.name,
-				order_doctype: cur_frm.doc.doctype,
+				subcontract_order: this.frm.doc.name,
+				order_doctype: this.frm.doc.doctype,
 			},
 			callback: (r) => {
 				var doclist = frappe.model.sync(r.message);
@@ -713,4 +705,4 @@ erpnext.buying.SubcontractingOrderController = class SubcontractingOrderControll
 	}
 };
 
-extend_cscript(cur_frm.cscript, new erpnext.buying.SubcontractingOrderController({ frm: cur_frm }));
+frappe.ui.form.set_controller("Subcontracting Order", erpnext.buying.SubcontractingOrderController);

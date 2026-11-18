@@ -16,6 +16,7 @@ from erpnext.accounts.doctype.financial_report_template.test_financial_report_te
 )
 from erpnext.accounts.doctype.journal_entry.test_journal_entry import make_journal_entry
 from erpnext.accounts.utils import get_currency_precision, get_fiscal_year
+from erpnext.tests.utils import change_settings
 
 
 class TestDependencyResolver(FinancialReportTemplateTestCase):
@@ -791,6 +792,7 @@ class TestFormulaCalculator(FinancialReportTemplateTestCase):
 			def __init__(self, formula, ref_code):
 				self.calculation_formula = formula
 				self.reference_code = ref_code
+				self.display_name = ref_code
 				self.data_source = "Calculated Amount"
 				self.idx = 1
 				self.reverse_sign = 0
@@ -858,9 +860,24 @@ class TestFormulaCalculator(FinancialReportTemplateTestCase):
 
 		calculator = FormulaCalculator(row_data, period_list)
 
-		result = calculator.evaluate_formula(self._create_mock_report_row("NUMERATOR / ZERO_VAL"))
-		expected = [0.0, 0.0, 0.0]
-		self.assertEqual(result, expected)
+		with self.assertRaises(frappe.ValidationError):
+			calculator.evaluate_formula(self._create_mock_report_row("NUMERATOR / ZERO_VAL"))
+
+	def test_reject_results_that_are_not_numbers(self):
+		"""A row shows an amount, so anything else is a broken formula"""
+		calculator = FormulaCalculator({"VALUE": [100.0]}, [{"key": "2023_q1"}])
+
+		# a comparison gives True/False, and bool passes isinstance(x, int)
+		for formula in ("VALUE > 5", "VALUE == 100", "not VALUE", "'text'", "[VALUE]"):
+			with self.subTest(formula=formula), self.assertRaises(frappe.ValidationError):
+				calculator.evaluate_formula(self._create_mock_report_row(formula))
+
+		# these still return an amount
+		for formula in ("VALUE and 5", "VALUE if VALUE else 0", "-VALUE"):
+			with self.subTest(formula=formula):
+				self.assertIsInstance(
+					calculator.evaluate_formula(self._create_mock_report_row(formula))[0], float
+				)
 
 	# 2. DATA HANDLING TESTS
 	def test_handle_missing_values(self):
@@ -884,9 +901,8 @@ class TestFormulaCalculator(FinancialReportTemplateTestCase):
 
 		# Empty row_data
 		empty_calculator = FormulaCalculator({}, period_list)
-		result = empty_calculator.evaluate_formula(self._create_mock_report_row("MISSING_CODE * 2"))
-		expected = [0.0, 0.0, 0.0]
-		self.assertEqual(result, expected)
+		with self.assertRaises(frappe.ValidationError):
+			empty_calculator.evaluate_formula(self._create_mock_report_row("MISSING_CODE * 2"))
 
 		# None values
 		row_data_with_none = {
@@ -925,17 +941,13 @@ class TestFormulaCalculator(FinancialReportTemplateTestCase):
 		expected = [200.0, 400.0, 600.0]
 		self.assertEqual(result, expected)
 
-		# Test with invalid reference code - should return 0.0 (code won't be in context)
-		result = calculator.evaluate_formula(self._create_mock_report_row("INVALID_CODE * 2"))
-		expected = [0.0, 0.0, 0.0]
-		self.assertEqual(result, expected)
+		# an unknown reference code stops the report rather than showing a zero
+		with self.assertRaises(frappe.ValidationError):
+			calculator.evaluate_formula(self._create_mock_report_row("INVALID_CODE * 2"))
 
-		# Test reference code case sensitivity
-		result = calculator.evaluate_formula(
-			self._create_mock_report_row("valid_code * 2")
-		)  # lowercase version
-		expected = [0.0, 0.0, 0.0]  # Should fail since codes are case-sensitive
-		self.assertEqual(result, expected)
+		# reference codes are case sensitive, so this one is unknown too
+		with self.assertRaises(frappe.ValidationError):
+			calculator.evaluate_formula(self._create_mock_report_row("valid_code * 2"))
 
 	def test_handle_mismatched_period_data_lengths(self):
 		"""Test scenarios with mismatched period data"""
@@ -1156,20 +1168,10 @@ class TestFormulaCalculator(FinancialReportTemplateTestCase):
 
 		calculator = FormulaCalculator(row_data, period_list)
 
-		# Test invalid syntax - should return 0.0 for all periods
-		result = calculator.evaluate_formula(self._create_mock_report_row("NORMAL + +"))  # Invalid syntax
-		expected = [0.0, 0.0, 0.0]
-		self.assertEqual(result, expected)
-
-		# Test undefined variable - should return 0.0 for all periods
-		result = calculator.evaluate_formula(self._create_mock_report_row("UNDEFINED_VAR * 2"))
-		expected = [0.0, 0.0, 0.0]
-		self.assertEqual(result, expected)
-
-		# Test empty formula - should return 0.0 for all periods
-		result = calculator.evaluate_formula(self._create_mock_report_row(""))
-		expected = [0.0, 0.0, 0.0]
-		self.assertEqual(result, expected)
+		# a broken formula stops the report instead of showing a plausible zero
+		for broken in ("NORMAL + +", "UNDEFINED_VAR * 2", "", "NORMAL + ∞"):
+			with self.assertRaises(frappe.ValidationError, msg=broken):
+				calculator.evaluate_formula(self._create_mock_report_row(broken))
 
 		# Test whitespace and formatting tolerance
 		result = calculator.evaluate_formula(
@@ -1182,13 +1184,6 @@ class TestFormulaCalculator(FinancialReportTemplateTestCase):
 		long_formula = "NORMAL + " + " + ".join(["10"] * 100)  # Very long formula
 		result = calculator.evaluate_formula(self._create_mock_report_row(long_formula))
 		expected = [1100.0, 1200.0, 1300.0]  # 100 + (100 * 10) = 1100 added to each value
-		self.assertEqual(result, expected)
-
-		# Test Unicode characters in formula (should fail gracefully)
-		result = calculator.evaluate_formula(
-			self._create_mock_report_row("NORMAL + ∞")
-		)  # Unicode infinity symbol
-		expected = [0.0, 0.0, 0.0]
 		self.assertEqual(result, expected)
 
 	def test_evaluate_math_function_edge_cases(self):
@@ -1218,8 +1213,7 @@ class TestFormulaCalculator(FinancialReportTemplateTestCase):
 
 		calculator = FormulaCalculator(row_data, period_list)
 
-		# Test that potentially harmful expressions are safely handled
-		# These should all return 0.0 due to safe evaluation failures
+		# Harmful expressions are refused outright, not quietly turned into a zero
 		harmful_expressions = [
 			"__import__('os').system('ls')",  # Import attempts
 			"eval('1+1')",  # Nested eval attempts
@@ -1231,8 +1225,8 @@ class TestFormulaCalculator(FinancialReportTemplateTestCase):
 
 		for expr in harmful_expressions:
 			with self.subTest(expression=expr):
-				result = calculator.evaluate_formula(self._create_mock_report_row(expr))
-				self.assertEqual(result, [0.0], f"Harmful expression '{expr}' should return [0.0]")
+				with self.assertRaises(frappe.ValidationError):
+					calculator.evaluate_formula(self._create_mock_report_row(expr))
 
 		# Only safe mathematical operations work
 		safe_expressions = [
@@ -1949,6 +1943,104 @@ class TestFinancialQueryBuilder(FinancialReportTemplateTestCase):
 					pcv.cancel()
 
 			jv_2023.cancel()
+
+	@change_settings("Accounts Settings", {"use_legacy_controller_for_pcv": 1})
+	def test_opening_balance_sums_acb_rows_across_dimensions(self):
+		"""
+		Account Closing Balance stores one row per (account, cost_center,
+		project, finance_book). The closing-balance fetch must sum all rows.
+		"""
+		company = "_Test Company"
+		cash_account = "_Test Cash - _TC"
+		sales_account = "Sales - _TC"
+		cc_1 = "_Test Cost Center - _TC"
+		cc_2 = "_Test Cost Center 2 - _TC"
+		docs = []
+
+		try:
+			jv_2023_cc1 = make_journal_entry(
+				account1=cash_account,
+				account2=sales_account,
+				amount=3000,
+				posting_date="2023-06-15",
+				cost_center=cc_1,
+				company=company,
+				submit=True,
+			)
+			docs.append(jv_2023_cc1)
+			jv_2023_cc2 = make_journal_entry(
+				account1=cash_account,
+				account2=sales_account,
+				amount=2000,
+				posting_date="2023-06-15",
+				cost_center=cc_2,
+				company=company,
+				submit=True,
+			)
+			docs.append(jv_2023_cc2)
+
+			fy_2023 = get_fiscal_year("2023-06-15", company=company)
+
+			pcv = frappe.get_doc(
+				{
+					"doctype": "Period Closing Voucher",
+					"transaction_date": "2023-12-31",
+					"period_start_date": fy_2023[1],
+					"period_end_date": fy_2023[2],
+					"company": company,
+					"fiscal_year": fy_2023[0],
+					"cost_center": cc_1,
+					"closing_account_head": "Deferred Revenue - _TC",
+					"remarks": "Test multi-dim PCV",
+				}
+			)
+			pcv.insert()
+			pcv.submit()
+			docs.append(pcv)
+
+			jv_2024 = make_journal_entry(
+				account1=cash_account,
+				account2=sales_account,
+				amount=100,
+				posting_date="2024-01-15",
+				cost_center=cc_1,
+				company=company,
+				submit=True,
+			)
+			docs.append(jv_2024)
+
+			filters = {
+				"company": company,
+				"from_fiscal_year": "2024",
+				"to_fiscal_year": "2024",
+				"period_start_date": "2024-01-01",
+				"period_end_date": "2024-03-31",
+				"filter_based_on": "Date Range",
+				"periodicity": "Monthly",
+				"ignore_closing_entries": True,
+			}
+			periods = [
+				{"key": "2024_jan", "from_date": "2024-01-01", "to_date": "2024-01-31"},
+				{"key": "2024_feb", "from_date": "2024-02-01", "to_date": "2024-02-29"},
+				{"key": "2024_mar", "from_date": "2024-03-01", "to_date": "2024-03-31"},
+			]
+
+			query_builder = FinancialQueryBuilder(filters, periods)
+			accounts = [
+				frappe._dict({"name": cash_account, "account_name": "Cash", "account_number": "1001"}),
+			]
+
+			balances_data = query_builder.fetch_account_balances(accounts)
+			cash_data = balances_data.get(cash_account)
+			self.assertIsNotNone(cash_data, "Cash account must appear in results")
+
+			jan_cash = cash_data.get_period("2024_jan")
+			self.assertEqual(jan_cash.opening, 5000.0)
+			self.assertEqual(jan_cash.movement, 100.0)
+			self.assertEqual(jan_cash.closing, 5100.0)
+
+		finally:
+			self.cancel_docs(docs)
 
 	def test_opening_entries_roll_into_opening_after_period_closing(self):
 		"""

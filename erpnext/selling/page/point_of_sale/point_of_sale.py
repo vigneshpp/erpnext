@@ -5,26 +5,31 @@
 import json
 
 import frappe
-from frappe.query_builder import DocType, Order
+from frappe import _
+from frappe.query_builder import Criterion, DocType, Order
 from frappe.utils import cint, get_datetime
 from frappe.utils.nestedset import get_root_of
 
 from erpnext.accounts.doctype.pos_invoice.pos_invoice import get_item_group, get_stock_availability
 from erpnext.accounts.doctype.pos_profile.pos_profile import get_child_nodes, get_item_groups
+from erpnext.stock.doctype.serial_no.serial_no import get_serial_nos
 from erpnext.stock.get_item_details import get_conversion_factor
+from erpnext.stock.serial_batch_identity import SerialBatchIdentity
 from erpnext.stock.utils import scan_barcode
+from erpnext.utilities.email_template import get_email_subject_and_message
 
 
-def search_by_term(search_term, warehouse, price_list):
-	result = search_for_serial_or_batch_or_barcode_number(search_term) or {}
+def search_by_term(search_term, warehouse, price_list, pos_profile, item_code=None, record_type=None):
+	result = search_for_serial_or_batch_or_barcode_number(search_term, pos_profile, item_code, record_type)
+	if result.get("candidates"):
+		return result
+	if not result.get("item_code"):
+		return
 
-	item_code = result.get("item_code", search_term)
+	item_code = result["item_code"]
 	serial_no = result.get("serial_no", "")
 	batch_no = result.get("batch_no", "")
 	barcode = result.get("barcode", "")
-
-	if not result:
-		return
 
 	item_doc = frappe.get_doc("Item", item_code)
 
@@ -109,7 +114,7 @@ def search_by_term(search_term, warehouse, price_list):
 			}
 		)
 
-	return {"items": [item]}
+	return {"items": [item], "barcode_scan": True}
 
 
 def filter_result_items(result, pos_profile):
@@ -121,14 +126,78 @@ def filter_result_items(result, pos_profile):
 		result["items"] = [item for item in result.get("items") if item.get("item_group") in pos_item_groups]
 
 
+def check_pos_item_access(pos_profile: str, item_code: str | None) -> None:
+	"""Entitle a POS endpoint that takes an Item from the caller, which get_items scopes for itself."""
+	check_pos_profile_access(pos_profile)
+	if not item_code:
+		return
+	item_groups = get_item_groups(pos_profile)
+	if item_groups and frappe.db.get_value("Item", item_code, "item_group") not in item_groups:
+		frappe.throw(_("The selected Item is not available on this POS Profile"), frappe.PermissionError)
+
+
+def scope_scan_result(result, pos_profile):
+	"""Narrow a scan to the Items the profile sells, the way get_items narrows its own results."""
+	if not result:
+		return result
+	item_groups = get_item_groups(pos_profile)
+	if not item_groups:
+		return result
+
+	rows = result.get("candidates") or ([result] if result.get("item_code") else [])
+	if not rows:
+		return result
+
+	allowed = set(
+		frappe.get_all(
+			"Item",
+			filters={"name": ("in", [row["item_code"] for row in rows]), "item_group": ("in", item_groups)},
+			pluck="name",
+		)
+	)
+	rows = [row for row in rows if row["item_code"] in allowed]
+	if not rows:
+		return {}
+	if len(rows) == 1:
+		return rows[0]
+	result["candidates"] = rows
+	return result
+
+
+def check_pos_profile_access(pos_profile: str | None) -> None:
+	"""The POS Profile is what entitles a caller to POS data — see the Bin/Item analysis on
+	pos_invoice.get_stock_availability. Record-level when a profile is named, so a Company User
+	Permission applies too."""
+	if isinstance(pos_profile, str) and pos_profile:
+		frappe.has_permission("POS Profile", doc=pos_profile, throw=True)
+	else:
+		frappe.has_permission("POS Profile", throw=True)
+
+
 @frappe.whitelist()
 def get_parent_item_group(pos_profile: str):
+	check_pos_profile_access(pos_profile)
+
+	# A deterministic default: get_item_groups() is list(set(...)), so [0] could land on a
+	# narrow/empty subtree and hide most of the catalog after a worker restart.
 	item_groups = get_item_groups(pos_profile)
+	if item_groups:
+		return get_common_ancestor_item_group(item_groups)
 
-	if not item_groups:
-		item_groups = frappe.get_all("Item Group", {"lft": 1, "is_group": 1}, pluck="name")
+	return frappe.get_all("Item Group", {"lft": 1, "is_group": 1}, pluck="name")[0]
 
-	return item_groups[0] if item_groups else None
+
+def get_common_ancestor_item_group(item_groups: list[str]) -> str:
+	bounds = frappe.get_all("Item Group", filters={"name": ("in", item_groups)}, fields=["lft", "rgt"])
+
+	# Deepest group whose subtree covers every group is their closest common ancestor.
+	return frappe.get_all(
+		"Item Group",
+		filters={"lft": ("<=", min(r.lft for r in bounds)), "rgt": (">=", max(r.rgt for r in bounds))},
+		pluck="name",
+		order_by="lft desc",
+		limit=1,
+	)[0]
 
 
 @frappe.whitelist()
@@ -139,7 +208,11 @@ def get_items(
 	item_group: str,
 	pos_profile: str,
 	search_term: str = "",
+	item_code: str | None = None,
+	record_type: str | None = None,
 ):
+	check_pos_profile_access(pos_profile)
+
 	warehouse, hide_unavailable_items = frappe.db.get_value(
 		"POS Profile", pos_profile, ["warehouse", "hide_unavailable_items"]
 	)
@@ -147,7 +220,7 @@ def get_items(
 	result = []
 
 	if search_term:
-		result = search_by_term(search_term, warehouse, price_list) or []
+		result = search_by_term(search_term, warehouse, price_list, pos_profile, item_code, record_type) or []
 		filter_result_items(result, pos_profile)
 		if result:
 			return result
@@ -155,50 +228,55 @@ def get_items(
 	if not frappe.db.exists("Item Group", item_group):
 		item_group = get_root_of("Item Group")
 
-	condition = get_conditions(search_term)
-	condition += get_item_group_condition(pos_profile)
-
 	lft, rgt = frappe.db.get_value("Item Group", item_group, ["lft", "rgt"])
 
-	bin_join_selection, bin_join_condition = "", ""
-	if hide_unavailable_items:
-		bin_join_selection = "LEFT JOIN `tabBin` bin ON bin.item_code = item.name"
-		bin_join_condition = "AND (item.is_stock_item = 0 OR (item.is_stock_item = 1 AND bin.warehouse = %(warehouse)s AND bin.actual_qty > 0))"
+	item = frappe.qb.DocType("Item")
+	item_group_dt = frappe.qb.DocType("Item Group")
 
-	items_data = frappe.db.sql(
-		"""
-		SELECT
-			item.name AS item_code,
+	item_group_subquery = (
+		frappe.qb.from_(item_group_dt)
+		.select(item_group_dt.name)
+		.where((item_group_dt.lft >= lft) & (item_group_dt.rgt <= rgt))
+	)
+
+	query = (
+		frappe.qb.from_(item)
+		.select(
+			item.name.as_("item_code"),
 			item.item_name,
 			item.description,
 			item.stock_uom,
-			item.image AS item_image,
+			item.image.as_("item_image"),
 			item.is_stock_item,
-			item.sales_uom
-		FROM
-			`tabItem` item {bin_join_selection}
-		WHERE
-			item.disabled = 0
-			AND item.has_variants = 0
-			AND item.is_sales_item = 1
-			AND item.is_fixed_asset = 0
-			AND item.item_group in (SELECT name FROM `tabItem Group` WHERE lft >= {lft} AND rgt <= {rgt})
-			AND {condition}
-			{bin_join_condition}
-		ORDER BY
-			item.name asc
-		LIMIT
-			{page_length} offset {start}""".format(
-			start=cint(start),
-			page_length=cint(page_length),
-			lft=cint(lft),
-			rgt=cint(rgt),
-			condition=condition,
-			bin_join_selection=bin_join_selection,
-			bin_join_condition=bin_join_condition,
-		),
-		{"warehouse": warehouse},
-		as_dict=1,
+			item.sales_uom,
+		)
+		.where(
+			(item.disabled == 0)
+			& (item.has_variants == 0)
+			& (item.is_sales_item == 1)
+			& (item.is_fixed_asset == 0)
+			& (item.item_group.isin(item_group_subquery))
+			& get_conditions(search_term, item)
+		)
+	)
+
+	item_group_condition = get_item_group_condition(pos_profile, item)
+	if item_group_condition is not None:
+		query = query.where(item_group_condition)
+
+	if hide_unavailable_items:
+		bin_dt = frappe.qb.DocType("Bin")
+		query = (
+			query.left_join(bin_dt)
+			.on(bin_dt.item_code == item.name)
+			.where(
+				(item.is_stock_item == 0)
+				| ((item.is_stock_item == 1) & (bin_dt.warehouse == warehouse) & (bin_dt.actual_qty > 0))
+			)
+		)
+
+	items_data = (
+		query.orderby(item.name, order=Order.asc).limit(cint(page_length)).offset(cint(start)).run(as_dict=1)
 	)
 
 	# return (empty) list if there are no results
@@ -226,6 +304,7 @@ def get_items(
 			.where(ItemPrice.selling == 1)
 			.where((ItemPrice.valid_from <= current_date) | (ItemPrice.valid_from.isnull()))
 			.where((ItemPrice.valid_upto >= current_date) | (ItemPrice.valid_upto.isnull()))
+			.orderby(ItemPrice.valid_from.isnull(), order=Order.asc)
 			.orderby(ItemPrice.valid_from, order=Order.desc)
 		).run(as_dict=True)
 
@@ -265,65 +344,110 @@ def get_items(
 
 
 @frappe.whitelist()
-def search_for_serial_or_batch_or_barcode_number(search_value: str) -> dict[str, str | None]:
-	return scan_barcode(search_value)
+def search_for_serial_or_batch_or_barcode_number(
+	search_value: str, pos_profile: str, item_code: str | None = None, record_type: str | None = None
+):
+	check_pos_item_access(pos_profile, item_code)
+
+	result = scope_scan_result(scan_barcode(search_value, item_code=item_code), pos_profile)
+	if record_type:
+		matches = [row for row in result.get("candidates", [result]) if row.get("record_type") == record_type]
+		if len(matches) != 1:
+			frappe.throw(_("The scanned record is no longer available. Please scan again."))
+		result = matches[0]
+	if result.get("record_type") == "Batch" and result.get("has_serial_no"):
+		frappe.throw(_("This item requires serial numbers. Please scan a serial number."))
+	return result
 
 
-def get_conditions(search_term):
-	condition = "("
-	condition += """item.name like {search_term}
-		or item.item_name like {search_term}""".format(search_term=frappe.db.escape("%" + search_term + "%"))
-	condition += add_search_fields_condition(search_term)
-	condition += ")"
+@frappe.whitelist()
+def get_serials_by_batch(item_code: str, serial_nos: str, pos_profile: str):
+	check_pos_item_access(pos_profile, item_code)
 
-	return condition
+	serial_ids = SerialBatchIdentity("Serial No").resolve(item_code, get_serial_nos(serial_nos))
+	if not serial_ids:
+		return {}
+	serials = {
+		row.name: row
+		for row in frappe.get_all(
+			"Serial No", filters={"name": ("in", serial_ids)}, fields=["name", "serial_no", "batch_no"]
+		)
+	}
+	batches = {}
+	for serial_id in serial_ids:
+		serial = serials[serial_id]
+		batches.setdefault(serial.batch_no or "", []).append(serial.serial_no)
+	return batches
 
 
-def add_search_fields_condition(search_term):
-	condition = ""
+def get_conditions(search_term, item=None):
+	if item is None:
+		item = frappe.qb.DocType("Item")
+
+	pattern = f"%{search_term}%"
+	conditions = [item.name.like(pattern), item.item_name.like(pattern)]
+	conditions += add_search_fields_condition(search_term, item)
+
+	return Criterion.any(conditions)
+
+
+def add_search_fields_condition(search_term, item=None):
+	if item is None:
+		item = frappe.qb.DocType("Item")
+
+	pattern = f"%{search_term}%"
+	conditions = []
 	search_fields = frappe.get_all("POS Search Fields", fields=["fieldname"])
-	if search_fields:
-		for field in search_fields:
-			if not field.get("fieldname"):
-				continue
-			condition += " or item.`{}` like {}".format(
-				field["fieldname"], frappe.db.escape("%" + search_term + "%")
-			)
-	return condition
+	for field in search_fields:
+		if not field.get("fieldname"):
+			continue
+		conditions.append(item[field["fieldname"]].like(pattern))
+
+	return conditions
 
 
-def get_item_group_condition(pos_profile):
-	cond = "and 1=1"
+def get_item_group_condition(pos_profile, item=None):
+	if item is None:
+		item = frappe.qb.DocType("Item")
+
 	item_groups = get_item_groups(pos_profile)
 	if item_groups:
-		cond = "and item.item_group in (%s)" % (", ".join(["%s"] * len(item_groups)))
+		return item.item_group.isin(item_groups)
 
-	return cond % tuple(item_groups)
+	return None
 
 
 @frappe.whitelist()
 @frappe.validate_and_sanitize_search_inputs
 def item_group_query(doctype: str, txt: str, searchfield: str, start: int, page_len: int, filters: dict):
-	item_groups = []
-	cond = "1=1"
 	pos_profile = filters.get("pos_profile")
+	check_pos_profile_access(pos_profile)
 
+	item_filters = [["name", "like", f"%{txt}%"]]
 	if pos_profile:
 		item_groups = get_item_groups(pos_profile)
-
 		if item_groups:
-			cond = "name in (%s)" % (", ".join(["%s"] * len(item_groups)))
-			cond = cond % tuple(item_groups)
+			item_filters.append(["name", "in", item_groups])
 
-	return frappe.db.sql(
-		f""" select distinct name from `tabItem Group`
-			where {cond} and (name like %(txt)s) limit {page_len} offset {start}""",
-		{"txt": "%%%s%%" % txt},
+	# get_list, not get_all: it adds the caller's Item Group User Permissions; a Desk User select row keeps everyone in
+	return frappe.get_list(
+		"Item Group",
+		filters=item_filters,
+		fields=["name"],
+		distinct=True,
+		order_by="",  # original raw SQL had no ORDER BY; suppress the injected default (creation desc on MariaDB)
+		limit_start=start,
+		limit_page_length=page_len,
+		as_list=True,
 	)
 
 
 @frappe.whitelist()
 def check_opening_entry(user: str):
+	# `user` was caller input, so anyone could enumerate another's open POS sessions; this is a POS Opening Entry question
+	if user != frappe.session.user:
+		frappe.has_permission("POS Opening Entry", throw=True)
+
 	open_vouchers = frappe.db.get_all(
 		"POS Opening Entry",
 		filters={"user": user, "pos_closing_entry": ["in", ["", None]], "docstatus": 1},
@@ -334,9 +458,13 @@ def check_opening_entry(user: str):
 	return open_vouchers
 
 
-@frappe.whitelist()
-def create_opening_voucher(pos_profile: str, company: str, balance_details: str):
-	balance_details = json.loads(balance_details)
+@frappe.whitelist(methods=["POST"])
+def create_opening_voucher(pos_profile: str, company: str, balance_details: str | list):
+	# submit() enforces POS Opening Entry rights per document, but only after the profile and company
+	# have been accepted from the caller — check the profile the session is being opened against.
+	check_pos_profile_access(pos_profile)
+
+	balance_details = frappe.parse_json(balance_details)
 
 	new_pos_opening = frappe.get_doc(
 		{
@@ -425,48 +553,91 @@ def get_past_order_list(search_term: str, status: str, limit: int = 20):
 	return invoice_list
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def set_customer_info(fieldname: str, customer: str, value: str = ""):
+	customer_doc = frappe.get_doc("Customer", customer)
+	customer_doc.check_permission("write")
+
 	if fieldname == "loyalty_program":
-		frappe.db.set_value("Customer", customer, "loyalty_program", value)
+		customer_doc.loyalty_program = value
+	else:
+		contact = customer_doc.get("customer_primary_contact")
+		if not contact:
+			Contact = DocType("Contact")
+			DynamicLink = DocType("Dynamic Link")
 
-	contact = frappe.get_cached_value("Customer", customer, "customer_primary_contact")
-	if not contact:
-		contact = frappe.db.sql(
-			"""
-			SELECT parent FROM `tabDynamic Link`
-			WHERE
-				parenttype = 'Contact' AND
-				parentfield = 'links' AND
-				link_doctype = 'Customer' AND
-				link_name = %s
-			""",
-			(customer),
-			as_dict=1,
-		)
-		contact = contact[0].get("parent") if contact else None
+			# Inner join with Contact DocType, to priorities records that have is_primary_contact set.
+			query = (
+				frappe.qb.from_(DynamicLink)
+				.join(Contact)
+				.on(DynamicLink.parent == Contact.name)
+				.select(DynamicLink.parent)
+				.where(
+					(DynamicLink.link_name == customer)
+					& (DynamicLink.parentfield == "links")
+					& (DynamicLink.parenttype == "Contact")
+					& (DynamicLink.link_doctype == "Customer")
+				)
+				.orderby(Contact.is_primary_contact, order=Order.desc)
+				# tiebreaker: contacts tie on is_primary_contact (the common no-primary case) ->
+				# pick the same one on MariaDB and Postgres
+				.orderby(DynamicLink.parent, order=Order.asc)
+			)
 
-	if not contact:
-		new_contact = frappe.new_doc("Contact")
-		new_contact.is_primary_contact = 1
-		new_contact.first_name = customer
-		new_contact.set("links", [{"link_doctype": "Customer", "link_name": customer}])
-		new_contact.save()
-		contact = new_contact.name
-		frappe.db.set_value("Customer", customer, "customer_primary_contact", contact)
+			contacts = query.run(pluck=DynamicLink.parent)
 
-	contact_doc = frappe.get_doc("Contact", contact)
-	if fieldname == "email_id":
-		contact_doc.set("email_ids", [{"email_id": value, "is_primary": 1}])
-		frappe.db.set_value("Customer", customer, "email_id", value)
-	elif fieldname == "mobile_no":
-		contact_doc.set("phone_nos", [{"phone": value, "is_primary_mobile_no": 1}])
-		frappe.db.set_value("Customer", customer, "mobile_no", value)
-	contact_doc.save()
+			contact = contacts[0] if contacts else None
+
+		if not contact:
+			new_contact = frappe.new_doc("Contact")
+			new_contact.is_primary_contact = 1
+			new_contact.first_name = customer
+			new_contact.set("links", [{"link_doctype": "Customer", "link_name": customer}])
+			new_contact.save()
+			contact = new_contact.name
+
+		def set_primary_phone_no_email(field, value):
+			# Create new record instead deleting existing email or phone_no and setting the new row as primary.
+			field_mapper = {
+				"email_ids": {"field": "email_id", "primary": "is_primary"},
+				"phone_nos": {"field": "phone", "primary": "is_primary_mobile_no"},
+			}
+
+			value_already_exists = False
+			for d in contact_doc.get(field):
+				if d.get(field_mapper[field].get("field")) == value and not value_already_exists:
+					d.set(field_mapper[field]["primary"], 1)
+					value_already_exists = True
+					continue
+				d.set(field_mapper[field]["primary"], 0)
+
+			if not value_already_exists:
+				contact_doc.append(
+					field, {field_mapper[field]["field"]: value, field_mapper[field]["primary"]: 1}
+				)
+
+		contact_doc = frappe.get_doc("Contact", contact)
+		# setting is_primary_contact = 1 on Contact to refetch the same contact incase it's removed from Customer records.
+		contact_doc.set("is_primary_contact", 1)
+		if fieldname == "email_id":
+			set_primary_phone_no_email("email_ids", value)
+		elif fieldname == "mobile_no":
+			set_primary_phone_no_email("phone_nos", value)
+		# Saving contact_doc to set mobile_no and email.
+		contact_doc.save()
+
+		# Auto-fetches from Contact DocType, no need to set values separately.
+		customer_doc.customer_primary_contact = contact
+
+	# using save method instead db.set_value which bypasses the validation for loyalty program
+	# and auto sets the mobile_no and email field on customer records.
+	customer_doc.save()
 
 
 @frappe.whitelist()
 def get_pos_profile_data(pos_profile: str):
+	check_pos_profile_access(pos_profile)
+
 	pos_profile = frappe.get_doc("POS Profile", pos_profile)
 	pos_profile = pos_profile.as_dict()
 
@@ -477,6 +648,23 @@ def get_pos_profile_data(pos_profile: str):
 
 	pos_profile.customer_groups = _customer_groups_with_children
 	return pos_profile
+
+
+@frappe.whitelist()
+def get_receipt_email_content(doctype: str, name: str) -> dict[str, str]:
+	if doctype not in ("POS Invoice", "Sales Invoice"):
+		frappe.throw(_("Receipts can only be emailed for a POS Invoice or a Sales Invoice."))
+
+	doc = frappe.get_doc(doctype, name)
+	doc.check_permission("email")
+	template_name = doc.pos_profile and frappe.db.get_value(
+		"POS Profile", doc.pos_profile, "receipt_email_template"
+	)
+	default_text = f"{_(doctype)}: {name}"
+	subject, message = get_email_subject_and_message(
+		template_name, {"doc": doc}, default_subject=default_text, default_message=default_text
+	)
+	return {"subject": subject, "message": message}
 
 
 def add_doctype_to_results(doctype, results):

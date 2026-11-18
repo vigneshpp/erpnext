@@ -251,9 +251,12 @@ def add_print_formats():
 	frappe.reload_doc("regional", "print_format", "simplified_tax_invoice")
 	frappe.reload_doc("regional", "print_format", "tax_invoice")
 
-	frappe.db.sql(
-		""" update `tabPrint Format` set disabled = 0 where
-		name in('Simplified Tax Invoice', 'Detailed Tax Invoice', 'Tax Invoice') """
+	pf = frappe.qb.DocType("Print Format")
+	(
+		frappe.qb.update(pf)
+		.set(pf.disabled, 0)
+		.where(pf.name.isin(["Simplified Tax Invoice", "Detailed Tax Invoice", "Tax Invoice"]))
+		.run()
 	)
 
 
@@ -270,7 +273,6 @@ def add_custom_roles_for_reports():
 def add_permissions():
 	"""Add Permissions for UAE VAT Settings and UAE VAT Account."""
 	for doctype in ("UAE VAT Settings", "UAE VAT Account"):
-		add_permission(doctype, "All", 0)
 		for role in ("Accounts Manager", "Accounts User", "System Manager"):
 			add_permission(doctype, role, 0)
 			update_permission_property(doctype, role, 0, "write", 1)

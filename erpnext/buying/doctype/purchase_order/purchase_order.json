@@ -5,8 +5,10 @@
  "allow_import": 1,
  "autoname": "naming_series:",
  "creation": "2013-05-21 16:16:39",
+ "description": "An order you place with a supplier.",
  "doctype": "DocType",
  "document_type": "Document",
+ "documentation": "https://docs.frappe.io/erpnext/user/manual/en/purchase-order",
  "engine": "InnoDB",
  "field_order": [
   "supplier_section",
@@ -24,8 +26,6 @@
   "is_subcontracted",
   "has_unit_price_items",
   "supplier_warehouse",
-  "section_break_zymg",
-  "title",
   "accounting_dimensions_section",
   "cost_center",
   "dimension_col_break",
@@ -57,9 +57,7 @@
   "net_total",
   "section_break_48",
   "pricing_rules",
-  "raw_material_details",
   "set_reserve_warehouse",
-  "supplied_items",
   "taxes_section",
   "tax_category",
   "taxes_and_charges",
@@ -157,6 +155,7 @@
   "auto_repeat",
   "update_auto_repeat_reference",
   "additional_info_section",
+  "title",
   "party_account_currency",
   "represents_company",
   "ref_sq",
@@ -165,6 +164,7 @@
   "mps",
   "is_internal_supplier",
   "inter_company_order_reference",
+  "remarks",
   "connections_tab"
  ],
  "fields": [
@@ -197,7 +197,6 @@
    "bold": 1,
    "fieldname": "supplier",
    "fieldtype": "Link",
-   "in_global_search": 1,
    "in_standard_filter": 1,
    "label": "Supplier",
    "oldfieldname": "supplier",
@@ -250,6 +249,7 @@
    "allow_on_submit": 1,
    "fieldname": "schedule_date",
    "fieldtype": "Date",
+   "in_import_template": 1,
    "in_list_view": 1,
    "label": "Required By"
   },
@@ -360,7 +360,6 @@
   {
    "fieldname": "contact_display",
    "fieldtype": "Small Text",
-   "in_global_search": 1,
    "label": "Contact Name",
    "read_only": 1
   },
@@ -399,6 +398,7 @@
   },
   {
    "collapsible": 1,
+   "collapsible_depends_on": "eval:doc.currency && doc.currency != erpnext.get_currency(doc.company)",
    "fieldname": "currency_and_price_list",
    "fieldtype": "Section Break",
    "label": "Currency and Price List",
@@ -412,6 +412,7 @@
    "oldfieldtype": "Select",
    "options": "Currency",
    "print_hide": 1,
+   "read_only_depends_on": "eval:doc.inter_company_order_reference",
    "reqd": 1
   },
   {
@@ -898,7 +899,7 @@
    "no_copy": 1,
    "oldfieldname": "status",
    "oldfieldtype": "Select",
-   "options": "\nDraft\nOn Hold\nTo Receive and Bill\nTo Bill\nTo Receive\nCompleted\nCancelled\nClosed\nDelivered",
+   "options": "\nDraft\nOn Hold\nTo Pay\nTo Receive and Bill\nTo Bill\nTo Receive\nCompleted\nCancelled\nClosed\nDelivered",
    "print_hide": 1,
    "read_only": 1,
    "reqd": 1,
@@ -929,8 +930,16 @@
    "fieldname": "inter_company_order_reference",
    "fieldtype": "Link",
    "label": "Inter Company Order Reference",
+   "no_copy": 1,
    "options": "Sales Order",
    "read_only": 1
+  },
+  {
+   "fieldname": "remarks",
+   "fieldtype": "Small Text",
+   "label": "Remarks",
+   "no_copy": 1,
+   "print_hide": 1
   },
   {
    "fieldname": "column_break_74",
@@ -1294,18 +1303,14 @@
    "fieldname": "auto_repeat_section",
    "fieldtype": "Section Break",
    "label": "Auto Repeat"
-  },
-  {
-   "fieldname": "section_break_zymg",
-   "fieldtype": "Section Break"
   }
  ],
  "grid_page_length": 50,
- "icon": "fa fa-file-text",
+ "icon": "shopping-cart",
  "idx": 105,
  "is_submittable": 1,
  "links": [],
- "modified": "2026-05-04 10:10:22.608381",
+ "modified": "2026-11-16 04:16:51.560603",
  "modified_by": "Administrator",
  "module": "Buying",
  "name": "Purchase Order",

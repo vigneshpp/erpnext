@@ -4,7 +4,9 @@
 
 import frappe
 from frappe import _
-from frappe.query_builder.functions import Sum
+from frappe.core.doctype.user_permission.user_permission import get_user_permissions
+from frappe.permissions import get_allowed_docs_for_doctype
+from frappe.query_builder.functions import Max, Sum
 
 
 def execute(filters=None):
@@ -45,6 +47,9 @@ def get_total_stock(filters):
 		.where(bin.actual_qty != 0)
 	)
 
+	if warehouses := get_allowed_docs_for_doctype(get_user_permissions().get("Warehouse", []), "Stock Entry"):
+		query = query.where(bin.warehouse.isin(warehouses))
+
 	if filters.get("group_by") == "Warehouse":
 		if filters.get("company"):
 			query = query.where(wh.company == filters.get("company"))
@@ -53,8 +58,9 @@ def get_total_stock(filters):
 	else:
 		query = query.select(wh.company).groupby(wh.company)
 
-	query = query.select(item.item_code, item.description, Sum(bin.actual_qty).as_("actual_qty")).groupby(
-		item.item_code
-	)
+	# description is constant per grouped item_code -> Max() keeps the GROUP BY valid on postgres
+	query = query.select(
+		item.item_code, Max(item.description).as_("description"), Sum(bin.actual_qty).as_("actual_qty")
+	).groupby(item.item_code)
 
 	return query.run()

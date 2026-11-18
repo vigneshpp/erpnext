@@ -2,14 +2,22 @@
 # License: GNU General Public License v3. See license.txt
 
 
+import json
 import os
 
 import frappe
+from frappe import N_ as _
 from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
 from frappe.desk.page.setup_wizard.setup_wizard import add_all_roles_to
+from frappe.permissions import (
+	add_permission,
+	get_all_perms,
+	get_doctypes_with_custom_docperms,
+	update_permission_property,
+)
+from frappe.utils import cint
 
 from erpnext.setup.doctype.incoterm.incoterm import create_incoterms
-from erpnext.setup.utils import identity as _
 
 from .default_success_action import get_default_success_action
 
@@ -21,11 +29,14 @@ def after_install():
 	if not frappe.db.exists("Role", "Analytics"):
 		frappe.get_doc({"doctype": "Role", "role_name": "Analytics"}).insert()
 
+	create_shop_floor_roles()
+
 	set_single_defaults()
 	setup_repost_defaults()
 	create_print_setting_custom_fields()
 	create_marketing_campaign_custom_fields()
 	create_address_and_contact_custom_fields()
+	setup_company_address_permissions()
 	create_custom_company_links()
 	add_all_roles_to("Administrator")
 	create_default_success_action()
@@ -38,9 +49,73 @@ def after_install():
 	make_default_operations()
 	update_pegged_currencies()
 	set_default_print_formats()
-	create_letter_head()
 	toggle_hidden_fields()
+	# nosemgrep: frappe-semgrep-rules.rules.frappe-manual-commit -- after_install
 	frappe.db.commit()
+
+
+def grant_address_read_to_accounts_manager():
+	if not frappe.db.exists("Role", "Accounts Manager"):
+		return
+	has_disabled_column = frappe.db.has_column("Custom DocPerm", "is_app_disabled")
+	if (
+		has_disabled_column
+		and "Address" in get_doctypes_with_custom_docperms()
+		and not frappe.db.exists("Custom DocPerm", {"parent": "Address", "is_app_disabled": 0})
+	):
+		print("Address / Accounts Manager: skipped, the site's Address rules are disabled with their app")
+		return
+	has_disabled_rule = False
+	has_rule = False
+	for rule in get_role_rules("Address", "Accounts Manager"):
+		if not cint(rule.get("is_app_disabled")):
+			has_rule = True
+		elif not cint(rule.permlevel):
+			has_disabled_rule = True
+	if has_disabled_rule:
+		print("Address / Accounts Manager: kept, the role's rule is disabled with its app")
+		return
+	if has_rule:
+		print("Address / Accounts Manager: kept, the role already has a rule")
+		return
+	logs = frappe.get_all(
+		"Permission Log",
+		filters={"for_doctype": "DocType", "for_document": "Address", "reference_type": "Custom DocPerm"},
+		fields=["name", "status", "reference", "changes"],
+	)
+	changed_rules = set()
+	for log in logs:
+		if log.status in ("Removed", "Updated"):
+			changed_rules.add(log.reference or log.name)
+	changed_roles = set()
+	if changed_rules:
+		changed_roles.update(
+			frappe.get_all("Custom DocPerm", filters={"name": ("in", list(changed_rules))}, pluck="role")
+		)
+	for log in logs:
+		if (log.reference or log.name) not in changed_rules:
+			continue
+		try:
+			logged = json.loads(log.changes) or {}
+		except (TypeError, ValueError):
+			continue
+		changed_roles.update(((logged.get("from") or {}).get("role"), (logged.get("to") or {}).get("role")))
+	if "Accounts Manager" in changed_roles:
+		print("Address / Accounts Manager: skipped, this site changed the rule")
+		return
+	add_permission("Address", "Accounts Manager", 0, "read")
+	update_permission_property("Address", "Accounts Manager", 0, "export", 0)
+	frappe.clear_cache(doctype="Address")
+	print("Address / Accounts Manager: granted read")
+
+
+def get_role_rules(doctype: str, role: str) -> list:
+	# frappe.get_meta reads only shipped rules while a patch or install runs; get_all_perms reads the site's.
+	rules = []
+	for rule in get_all_perms(role):
+		if rule.parent == doctype:
+			rules.append(rule)
+	return rules
 
 
 def make_default_operations():
@@ -51,6 +126,15 @@ def make_default_operations():
 			doc.insert(ignore_permissions=True)
 
 
+def create_shop_floor_roles():
+	"""Roles that drive the Shop Floor page's two experiences (manager board vs operator view)."""
+	for role_name in ("Shop Floor Manager", "Shop Floor User"):
+		if not frappe.db.exists("Role", role_name):
+			frappe.get_doc({"doctype": "Role", "role_name": role_name, "desk_access": 1}).insert(
+				ignore_permissions=True
+			)
+
+
 def set_single_defaults():
 	for dt in (
 		"Accounts Settings",
@@ -59,10 +143,8 @@ def set_single_defaults():
 		"Selling Settings",
 		"Stock Settings",
 	):
-		default_values = frappe.db.sql(
-			"""select fieldname, `default` from `tabDocField`
-			where parent=%s""",
-			dt,
+		default_values = frappe.get_all(
+			"DocField", filters={"parent": dt}, fields=["fieldname", "default"], as_list=True
 		)
 		if default_values:
 			try:
@@ -87,14 +169,7 @@ def setup_repost_defaults():
 def setup_currency_exchange():
 	ces = frappe.get_single("Currency Exchange Settings")
 	try:
-		ces.set("result_key", [])
-		ces.set("req_params", [])
-
-		ces.api_endpoint = "https://api.frankfurter.dev/v1/{transaction_date}"
-		ces.append("result_key", {"key": "rates"})
-		ces.append("result_key", {"key": "{to_currency}"})
-		ces.append("req_params", {"key": "base", "value": "{from_currency}"})
-		ces.append("req_params", {"key": "symbols", "value": "{to_currency}"})
+		ces.service_provider = "frankfurter.dev - v2"
 		ces.save()
 	except frappe.ValidationError:
 		pass
@@ -163,6 +238,7 @@ def create_address_and_contact_custom_fields():
 					"fieldtype": "Check",
 					"default": "0",
 					"insert_after": "linked_with",
+					"permlevel": 1,
 				},
 			],
 			"Contact": [
@@ -175,6 +251,15 @@ def create_address_and_contact_custom_fields():
 			],
 		}
 	)
+
+
+def setup_company_address_permissions():
+	"""Only Accounts Manager and System Manager may mark an address as the company's own (permlevel 1)."""
+	grant_address_read_to_accounts_manager()
+
+	for role in ("System Manager", "Accounts Manager"):
+		add_permission("Address", role, 1)
+		update_permission_property("Address", role, 1, "write", 1)
 
 
 def create_default_success_action():
@@ -344,21 +429,22 @@ def update_pegged_currencies():
 
 
 def set_default_print_formats():
-	default_map = {
-		"Sales Order": "Sales Order with Item Image",
-		"Sales Invoice": "Sales Invoice with Item Image",
-		"Delivery Note": "Delivery Note with Item Image",
-		"Purchase Order": "Purchase Order with Item Image",
-		"Purchase Invoice": "Purchase Invoice with Item Image",
-		"POS Invoice": "POS Invoice with Item Image",
-		"Quotation": "Quotation with Item Image",
-		"Request for Quotation": "Request for Quotation with Item Image",
-	}
+	doctypes = (
+		"Sales Order",
+		"Sales Invoice",
+		"Delivery Note",
+		"Purchase Order",
+		"Purchase Invoice",
+		"POS Invoice",
+		"Quotation",
+		"Request for Quotation",
+	)
 
-	for doctype, print_format in default_map.items():
+	for doctype in doctypes:
 		if frappe.get_meta(doctype).default_print_format:
 			continue
 
+		print_format = f"{doctype} Classic"
 		if not frappe.db.exists("Print Format", print_format):
 			continue
 
@@ -374,30 +460,6 @@ def set_default_print_formats():
 		)
 
 
-def create_letter_head():
-	base_path = frappe.get_app_path("erpnext", "accounts", "letterhead")
-
-	letterheads = {
-		"Company Letterhead": "company_letterhead.html",
-		"Company Letterhead - Grey": "company_letterhead_grey.html",
-	}
-
-	for name, filename in letterheads.items():
-		if not frappe.db.exists("Letter Head", name):
-			content = frappe.read_file(os.path.join(base_path, filename))
-			doc = frappe.get_doc(
-				{
-					"doctype": "Letter Head",
-					"letter_head_name": name,
-					"source": "HTML",
-					"content": content,
-					"is_default": 1 if name == "Company Letterhead - Grey" else 0,
-					"letter_head_for": "Report",
-				}
-			)
-			doc.insert(ignore_permissions=True)
-
-
 def toggle_hidden_fields():
 	from erpnext.accounts.doctype.accounts_settings.accounts_settings import (
 		toggle_accounting_dimension_sections,
@@ -405,12 +467,20 @@ def toggle_hidden_fields():
 		toggle_sales_discount_section,
 		toggle_subscription_sections,
 	)
+	from erpnext.selling.doctype.selling_settings.selling_settings import (
+		toggle_tracking_sales_commissions_section,
+		toggle_utm_analytics_section,
+	)
 
 	acc_settings = frappe.get_doc("Accounts Settings")
 	toggle_accounting_dimension_sections(not acc_settings.enable_accounting_dimensions)
 	toggle_sales_discount_section(not acc_settings.enable_discounts_and_margin)
 	toggle_subscription_sections(not acc_settings.enable_subscription)
 	toggle_loyalty_point_program_section(not acc_settings.enable_loyalty_point_program)
+
+	selling_settings = frappe.get_doc("Selling Settings")
+	toggle_tracking_sales_commissions_section(not selling_settings.enable_tracking_sales_commissions)
+	toggle_utm_analytics_section(not selling_settings.enable_utm)
 
 
 DEFAULT_ROLE_PROFILES = {
@@ -440,3 +510,19 @@ DEFAULT_ROLE_PROFILES = {
 		"Purchase Manager",
 	],
 }
+
+
+def after_app_install(app_name=None):
+	if app_name == "crm":
+		from erpnext.crm.frappe_crm_api import remove_allowed_users_on_crm_install
+
+		remove_allowed_users_on_crm_install()
+
+
+def after_app_uninstall(app_name=None):
+	if app_name == "crm":
+		from erpnext.crm.frappe_crm_api import disable_frappe_crm_data_synchronization_on_crm_uninstall
+
+		disable_frappe_crm_data_synchronization_on_crm_uninstall()
+
+		frappe.db.commit()  # nosemgrep

@@ -95,9 +95,9 @@ erpnext.BOMComparisonTool = class BOMComparisonTool {
 					let [fieldname, value1, value2] = change;
 					return `
 						<tr>
-							<td>${frappe.meta.get_label(doctype, fieldname)}</td>
-							<td>${value1}</td>
-							<td>${value2}</td>
+							<td>${frappe.meta.get_translated_label(doctype, fieldname)}</td>
+							<td>${frappe.utils.escape_html(cstr(value1))}</td>
+							<td>${frappe.utils.escape_html(cstr(value2))}</td>
 						</tr>
 					`;
 				})
@@ -138,13 +138,17 @@ erpnext.BOMComparisonTool = class BOMComparisonTool {
 							.map((change, i) => {
 								let [fieldname, value1, value2] = change;
 								let th =
-									i === 0 ? `<th rowspan="${values_changed.length}">${item_code}</th>` : "";
+									i === 0
+										? `<th rowspan="${values_changed.length}">${frappe.utils.escape_html(
+												cstr(item_code)
+										  )}</th>`
+										: "";
 								return `
 						<tr>
 							${th}
-							<td>${frappe.meta.get_label(child_doctype, fieldname)}</td>
-							<td>${value1}</td>
-							<td>${value2}</td>
+							<td>${frappe.meta.get_translated_label(child_doctype, fieldname)}</td>
+							<td>${frappe.utils.escape_html(cstr(value1))}</td>
+							<td>${frappe.utils.escape_html(cstr(value2))}</td>
 						</tr>
 					`;
 							})
@@ -177,7 +181,9 @@ erpnext.BOMComparisonTool = class BOMComparisonTool {
 					let html = rows
 						.map((row) => {
 							let [, doc] = row;
-							let cells = fields.map((df) => `<td>${doc[df.fieldname]}</td>`).join("");
+							let cells = fields
+								.map((df) => `<td>${frappe.utils.escape_html(cstr(doc[df.fieldname]))}</td>`)
+								.join("");
 							return `<tr>${cells}</tr>`;
 						})
 						.join("");

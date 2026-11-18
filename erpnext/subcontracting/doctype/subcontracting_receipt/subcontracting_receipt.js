@@ -31,6 +31,9 @@ frappe.ui.form.on("Subcontracting Receipt", {
 		frappe.dynamic_link = { doc: frm.doc, fieldname: "supplier", doctype: "Supplier" };
 
 		erpnext.toggle_serial_batch_fields(frm);
+		erpnext.accounts.ledger_preview.show_accounting_ledger_preview(frm);
+		erpnext.accounts.ledger_preview.show_stock_ledger_preview(frm);
+
 		if (frm.doc.docstatus === 1) {
 			frm.add_custom_button(
 				__("Stock Ledger"),
@@ -68,7 +71,7 @@ frappe.ui.form.on("Subcontracting Receipt", {
 					__("Purchase Receipt"),
 					() => {
 						frappe.model.open_mapped_doc({
-							method: "erpnext.subcontracting.doctype.subcontracting_receipt.subcontracting_receipt.make_purchase_receipt",
+							method: "erpnext.subcontracting.doctype.subcontracting_receipt.mapper.make_purchase_receipt",
 							frm: frm,
 							freeze: true,
 							freeze_message: __("Creating Purchase Receipt ..."),
@@ -85,7 +88,7 @@ frappe.ui.form.on("Subcontracting Receipt", {
 				() => {
 					const make_standard_return = () => {
 						frappe.model.open_mapped_doc({
-							method: "erpnext.subcontracting.doctype.subcontracting_receipt.subcontracting_receipt.make_subcontract_return",
+							method: "erpnext.subcontracting.doctype.subcontracting_receipt.mapper.make_subcontract_return",
 							frm: frm,
 						});
 					};
@@ -109,7 +112,7 @@ frappe.ui.form.on("Subcontracting Receipt", {
 							function (values) {
 								if (values.return_for_rejected_warehouse) {
 									frappe.call({
-										method: "erpnext.subcontracting.doctype.subcontracting_receipt.subcontracting_receipt.make_subcontract_return_against_rejected_warehouse",
+										method: "erpnext.subcontracting.doctype.subcontracting_receipt.mapper.make_subcontract_return_against_rejected_warehouse",
 										args: {
 											source_name: frm.doc.name,
 										},
@@ -143,7 +146,7 @@ frappe.ui.form.on("Subcontracting Receipt", {
 					if (!frm.doc.supplier) {
 						frappe.throw({
 							title: __("Mandatory"),
-							message: __("Please Select a Supplier"),
+							message: __("Please select a supplier"),
 						});
 					}
 
@@ -217,9 +220,7 @@ frappe.ui.form.on("Subcontracting Receipt", {
 
 		frm.set_query("billing_address", erpnext.queries.company_address_query);
 
-		frm.set_query("shipping_address", () => {
-			return erpnext.queries.company_address_query(frm.doc);
-		});
+		frm.set_query("shipping_address", erpnext.queries.company_address_query);
 
 		frm.set_query("rejected_warehouse", () => {
 			return {
@@ -332,7 +333,11 @@ frappe.ui.form.on("Subcontracting Receipt", {
 	},
 
 	setup_quality_inspection: (frm) => {
-		if (!frm.is_new() && frm.doc.docstatus === 0 && !frm.doc.is_return) {
+		if (
+			!frm.is_new() &&
+			(frm.doc.docstatus === 0 || frm.doc.__onload?.allow_to_make_qc_after_submission) &&
+			!frm.doc.is_return
+		) {
 			let transaction_controller = new erpnext.TransactionController({ frm: frm });
 			transaction_controller.setup_quality_inspection();
 		}

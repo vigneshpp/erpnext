@@ -40,9 +40,9 @@ frappe.ui.form.on("Opportunity", {
 			erpnext.utils.get_party_details(frm);
 		} else if (frm.doc.opportunity_from == "Lead") {
 			erpnext.utils.map_current_doc({
-				method: "erpnext.crm.doctype.lead.lead.make_opportunity",
+				method: "erpnext.crm.doctype.lead.mapper.make_opportunity",
 				source_name: frm.doc.party_name,
-				frm: frm,
+				target: frm,
 			});
 		}
 	},
@@ -73,7 +73,7 @@ frappe.ui.form.on("Opportunity", {
 	refresh: function (frm) {
 		var doc = frm.doc;
 		frm.trigger("setup_opportunity_from");
-		erpnext.toggle_naming_series();
+		erpnext.toggle_naming_series(frm);
 
 		if (!frm.is_new() && doc.status !== "Lost") {
 			if (doc.items) {
@@ -204,14 +204,14 @@ frappe.ui.form.on("Opportunity", {
 
 	make_supplier_quotation: function (frm) {
 		frappe.model.open_mapped_doc({
-			method: "erpnext.crm.doctype.opportunity.opportunity.make_supplier_quotation",
+			method: "erpnext.crm.doctype.opportunity.mapper.make_supplier_quotation",
 			frm: frm,
 		});
 	},
 
 	make_request_for_quotation: function (frm) {
 		frappe.model.open_mapped_doc({
-			method: "erpnext.crm.doctype.opportunity.opportunity.make_request_for_quotation",
+			method: "erpnext.crm.doctype.opportunity.mapper.make_request_for_quotation",
 			frm: frm,
 		});
 	},
@@ -269,6 +269,23 @@ frappe.ui.form.on("Opportunity Item", {
 	rate: function (frm, cdt, cdn) {
 		frm.trigger("calculate", cdt, cdn);
 	},
+	item_code: function (frm, cdt, cdn) {
+		let d = locals[cdt][cdn];
+		if (d.item_code) {
+			return frappe.call({
+				method: "erpnext.crm.doctype.opportunity.opportunity.get_item_details",
+				args: { item_code: d.item_code },
+				callback: function (r) {
+					if (r.message) {
+						$.each(r.message, function (k, v) {
+							frappe.model.set_value(cdt, cdn, k, v);
+						});
+						refresh_field("image_view", d.name, "items");
+					}
+				},
+			});
+		}
+	},
 });
 
 // TODO commonify this code
@@ -285,7 +302,8 @@ erpnext.crm.Opportunity = class Opportunity extends frappe.ui.form.Controller {
 		}
 
 		if (this.frm.is_new() && this.frm.doc.opportunity_type === undefined) {
-			this.frm.doc.opportunity_type = __("Sales");
+			// set via set_value so the translated_doctype Link stores the name, not its translation
+			this.frm.set_value("opportunity_type", "Sales");
 		}
 		this.setup_queries();
 	}
@@ -341,14 +359,14 @@ erpnext.crm.Opportunity = class Opportunity extends frappe.ui.form.Controller {
 
 	create_quotation() {
 		frappe.model.open_mapped_doc({
-			method: "erpnext.crm.doctype.opportunity.opportunity.make_quotation",
+			method: "erpnext.crm.doctype.opportunity.mapper.make_quotation",
 			frm: this.frm,
 		});
 	}
 
 	make_customer() {
 		frappe.model.open_mapped_doc({
-			method: "erpnext.crm.doctype.opportunity.opportunity.make_customer",
+			method: "erpnext.crm.doctype.opportunity.mapper.make_customer",
 			frm: this.frm,
 		});
 	}
@@ -372,22 +390,4 @@ erpnext.crm.Opportunity = class Opportunity extends frappe.ui.form.Controller {
 	}
 };
 
-extend_cscript(cur_frm.cscript, new erpnext.crm.Opportunity({ frm: cur_frm }));
-
-cur_frm.cscript.item_code = function (doc, cdt, cdn) {
-	var d = locals[cdt][cdn];
-	if (d.item_code) {
-		return frappe.call({
-			method: "erpnext.crm.doctype.opportunity.opportunity.get_item_details",
-			args: { item_code: d.item_code },
-			callback: function (r, rt) {
-				if (r.message) {
-					$.each(r.message, function (k, v) {
-						frappe.model.set_value(cdt, cdn, k, v);
-					});
-					refresh_field("image_view", d.name, "items");
-				}
-			},
-		});
-	}
-};
+frappe.ui.form.set_controller("Opportunity", erpnext.crm.Opportunity);

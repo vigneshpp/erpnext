@@ -87,9 +87,14 @@ frappe.ui.form.on("Repost Item Valuation", {
 
 	refresh: function (frm) {
 		if (frm.doc.status == "Failed" && frm.doc.docstatus == 1) {
-			frm.add_custom_button(__("Restart"), function () {
-				frm.trigger("restart_reposting");
-			}).addClass("btn-primary");
+			frm.add_custom_button(
+				__("Restart"),
+				function () {
+					frm.trigger("restart_reposting");
+				},
+				null,
+				"primary"
+			);
 		}
 
 		if (frm.doc.status !== "Completed") {
@@ -105,8 +110,10 @@ frappe.ui.form.on("Repost Item Valuation", {
 		frm.add_custom_button(__("Start Reposting"), () => {
 			frappe.call({
 				method: "erpnext.stock.doctype.repost_item_valuation.repost_item_valuation.execute_repost_item_valuation",
-				callback: function () {
-					frappe.msgprint(__("Reposting has been started in the background."));
+				callback: function (r) {
+					if (r.message) {
+						frappe.msgprint(__("Reposting has been started in the background."));
+					}
 				},
 			});
 		});
@@ -118,7 +125,7 @@ frappe.ui.form.on("Repost Item Valuation", {
 		let progress = 0.0;
 		let total_count = frm.doc.items_to_be_repost ? JSON.parse(frm.doc.items_to_be_repost).length : 0;
 
-		if (total_count > 1) {
+		if (total_count > 1 && frm.doc.based_on !== "Item and Warehouse") {
 			progress = flt((cint(frm.doc.current_index) / total_count) * 100, 2) || 0.5;
 			title = __("Reposting for Item-Wh Completed {0}%", [progress]);
 

@@ -2,14 +2,17 @@
 # License: GNU General Public License v3. See license.txt
 
 
-import calendar
-
 import frappe
 from frappe import _
-from frappe.utils import cint, cstr, getdate
+from frappe.permissions import get_user_permissions
+from frappe.utils import cint, cstr, formatdate, getdate
+
+from erpnext.accounts.report.utils import validate_date_range
 
 
 def execute(filters=None):
+	validate_date_range(filters)
+
 	common_columns = [
 		{
 			"label": _("New Customers"),
@@ -85,7 +88,7 @@ def get_data_by_time(filters, common_columns):
 			out.append(
 				{
 					"year": cstr(year),
-					"month": calendar.month_name[month],
+					"month": formatdate(f"{key}-01", "MMMM"),
 					"new_customers": new[0],
 					"repeat_customers": repeat[0],
 					"total": new[0] + repeat[0],
@@ -112,8 +115,8 @@ def get_data_by_territory(filters, common_columns):
 	customers_in = get_customer_stats(filters, tree_view=True)
 
 	territory_dict = {}
-	for t in frappe.db.sql(
-		"""SELECT name, lft, parent_territory, is_group FROM `tabTerritory` ORDER BY lft""", as_dict=1
+	for t in frappe.get_all(
+		"Territory", fields=["name", "lft", "parent_territory", "is_group"], order_by="lft"
 	):
 		territory_dict.update({t.name: {"parent": t.parent_territory, "is_group": t.is_group}})
 
@@ -154,30 +157,62 @@ def get_data_by_territory(filters, common_columns):
 
 
 def get_customer_stats(filters, tree_view=False):
-	"""Calculates number of new and repeated customers and revenue."""
-	company_condition = ""
+	"""Count distinct new and repeat customers and their revenue per period."""
+	si_filters = {"docstatus": 1, "posting_date": ["<=", filters.get("to_date")]}
 	if filters.get("company"):
-		company_condition = " and company=%(company)s"
+		si_filters["company"] = filters.get("company")
 
-	customers = []
+	# scope to the user's permitted customers; the report serves roles without Sales
+	# Invoice read, so apply the Customer restriction directly instead of via get_list
+	permitted_customers = get_permitted_customers()
+	if permitted_customers is not None:
+		si_filters["customer"] = ["in", permitted_customers]
+
+	invoices = frappe.get_all(
+		"Sales Invoice",
+		filters=si_filters,
+		fields=["territory", "posting_date", "customer", "base_grand_total", "is_return"],
+		order_by="posting_date, name",
+	)
+
+	# resolve each customer's acquisition (first sale) before assigning revenue, so a same-day
+	# return is matched to its acquisition period regardless of row order; returns never acquire
+	acquisition = {}
+	for si in invoices:
+		if not si.is_return and si.customer not in acquisition:
+			key = si.territory if tree_view else getdate(si.posting_date).strftime("%Y-%m")
+			acquisition[si.customer] = (key, getdate(si.posting_date))
+
+	from_date = getdate(filters.get("from_date"))
+	counted = {}  # key -> {"new": set of customers, "repeat": set of customers}
 	customers_in = {}
+	for si in invoices:
+		posting_date = getdate(si.posting_date)
+		if posting_date < from_date:
+			continue
 
-	for si in frappe.db.sql(
-		f"""select territory, posting_date, customer, base_grand_total from `tabSales Invoice`
-		where docstatus=1 and posting_date <= %(to_date)s
-		{company_condition} order by posting_date""",
-		filters,
-		as_dict=1,
-	):
-		key = si.territory if tree_view else si.posting_date.strftime("%Y-%m")
-		new_or_repeat = "new" if si.customer not in customers else "repeat"
+		key = si.territory if tree_view else posting_date.strftime("%Y-%m")
+		acq = acquisition.get(si.customer)
+		new_or_repeat = "new" if acq and key == acq[0] and acq[1] >= from_date else "repeat"
+
 		customers_in.setdefault(key, {"new": [0, 0.0], "repeat": [0, 0.0]})
+		counted.setdefault(key, {"new": set(), "repeat": set()})
 
-		# if filters.from_date <= si.posting_date.strftime('%Y-%m-%d'):
-		if getdate(filters.from_date) <= getdate(si.posting_date):
+		# count each customer once per period; returns net revenue but not the headcount
+		if not si.is_return and si.customer not in counted[key][new_or_repeat]:
+			counted[key][new_or_repeat].add(si.customer)
 			customers_in[key][new_or_repeat][0] += 1
-			customers_in[key][new_or_repeat][1] += si.base_grand_total
-		if new_or_repeat == "new":
-			customers.append(si.customer)
+		customers_in[key][new_or_repeat][1] += si.base_grand_total
 
 	return customers_in
+
+
+def get_permitted_customers():
+	"""Customers the current user is restricted to, or None when unrestricted."""
+	customer_perms = get_user_permissions(frappe.session.user).get("Customer") or []
+	allowed = [
+		perm.get("doc")
+		for perm in customer_perms
+		if not perm.get("applicable_for") or perm.get("applicable_for") == "Sales Invoice"
+	]
+	return allowed or None

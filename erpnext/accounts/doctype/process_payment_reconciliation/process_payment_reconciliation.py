@@ -7,6 +7,7 @@ import frappe
 from frappe import _, qb
 from frappe.model.document import Document
 from frappe.utils import get_link_to_form
+from frappe.utils.background_jobs import get_jobs
 from frappe.utils.scheduler import is_scheduler_inactive
 
 
@@ -23,7 +24,7 @@ class ProcessPaymentReconciliation(Document):
 		bank_cash_account: DF.Link | None
 		company: DF.Link
 		cost_center: DF.Link | None
-		default_advance_account: DF.Link
+		default_advance_account: DF.Link | None
 		error_log: DF.LongText | None
 		from_invoice_date: DF.Date | None
 		from_payment_date: DF.Date | None
@@ -106,6 +107,8 @@ def get_pr_instance(doc: str):
 		"party",
 		"receivable_payable_account",
 		"default_advance_account",
+		"bank_cash_account",
+		"cost_center",
 		"from_invoice_date",
 		"to_invoice_date",
 		"from_payment_date",
@@ -121,29 +124,28 @@ def get_pr_instance(doc: str):
 
 
 def is_job_running(job_name: str) -> bool:
-	jobs = frappe.db.get_all("RQ Job", filters={"status": ["in", ["started", "queued"]]})
-	for x in jobs:
-		if x.job_name == job_name:
-			return True
-	return False
+	return job_name in get_jobs(site=frappe.local.site, key="job_name")[frappe.local.site]
 
 
 @frappe.whitelist()
 def pause_job_for_doc(docname: str | None = None):
 	if docname:
+		frappe.has_permission("Process Payment Reconciliation", "write", doc=docname, throw=True)
 		frappe.db.set_value("Process Payment Reconciliation", docname, "status", "Paused")
 		log = frappe.db.get_value("Process Payment Reconciliation Log", filters={"process_pr": docname})
 		if log:
 			frappe.db.set_value("Process Payment Reconciliation Log", log, "status", "Paused")
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def trigger_job_for_doc(docname: str | None = None):
 	"""
 	Trigger background job
 	"""
 	if not docname:
 		return
+
+	frappe.has_permission("Process Payment Reconciliation", "write", doc=docname, throw=True)
 
 	if not frappe.get_single_value("Accounts Settings", "auto_reconcile_payments"):
 		frappe.throw(
@@ -218,10 +220,7 @@ def trigger_reconciliation_for_queued_docs():
 		fields = ["company", "party_type", "party", "receivable_payable_account", "default_advance_account"]
 
 		def get_filters_as_tuple(fields, doc):
-			filters = ()
-			for x in fields:
-				filters += tuple(doc.get(x))
-			return filters
+			return tuple(doc.get(x) or "" for x in fields)
 
 		for x in all_queued:
 			doc = frappe.get_doc("Process Payment Reconciliation", x)
@@ -250,7 +249,7 @@ def reconcile_based_on_filters(doc: None | str = None) -> None:
 			log = frappe.new_doc("Process Payment Reconciliation Log")
 			log.process_pr = doc
 			log.status = "Running"
-			log = log.save()
+			log = log.save(ignore_permissions=True)
 
 			job_name = f"process_{doc}_fetch_and_allocate"
 			if not is_job_running(job_name):
@@ -368,7 +367,7 @@ def fetch_and_allocate(doc: str) -> None:
 				reconcile_log.allocated = True
 				reconcile_log.total_allocations = len(reconcile_log.get("allocations"))
 				reconcile_log.reconciled_entries = 0
-				reconcile_log.save()
+				reconcile_log.save(ignore_permissions=True)
 
 				# generate reconcile job name
 				allocation = get_next_allocation(log)
@@ -415,6 +414,15 @@ def reconcile(doc: None | str = None) -> None:
 					for x in allocations:
 						pr.append("allocation", x)
 
+					pr.get_nonreconciled_payment_entries()
+					pr.get_invoice_entries(
+						vouchers=[
+							frappe._dict(voucher_type=x.invoice_type, voucher_no=x.invoice_number)
+							for x in allocations
+						]
+					)
+					pr.validate_allocation()
+
 					skip_ref_details_update_for_pe = check_multi_currency(pr)
 					# reconcile
 					pr.reconcile_allocations(skip_ref_details_update_for_pe=skip_ref_details_update_for_pe)
@@ -431,7 +439,9 @@ def reconcile(doc: None | str = None) -> None:
 					# Update reconciled flag
 					allocation_names = [x.name for x in allocations]
 					ppa = qb.DocType("Process Payment Reconciliation Log Allocations")
-					qb.update(ppa).set(ppa.reconciled, True).where(ppa.name.isin(allocation_names)).run()
+					qb.update(ppa).set(ppa.reconciled, 1).where(
+						ppa.name.isin(allocation_names)
+					).run()  # smallint, not bool
 
 					# Update reconciled count
 					reconciled_count = frappe.db.count(
@@ -477,7 +487,7 @@ def reconcile(doc: None | str = None) -> None:
 				finally:
 					if reconciled_entries == total_allocations:
 						frappe.db.set_value("Process Payment Reconciliation Log", log, "status", "Reconciled")
-						frappe.db.set_value("Process Payment Reconciliation Log", log, "reconciled", True)
+						frappe.db.set_value("Process Payment Reconciliation Log", log, "reconciled", 1)
 						frappe.db.set_value("Process Payment Reconciliation", doc, "status", "Completed")
 					else:
 						if frappe.db.get_value("Process Payment Reconciliation", doc, "status") != "Paused":
@@ -501,7 +511,7 @@ def reconcile(doc: None | str = None) -> None:
 								)
 			else:
 				frappe.db.set_value("Process Payment Reconciliation Log", log, "status", "Reconciled")
-				frappe.db.set_value("Process Payment Reconciliation Log", log, "reconciled", True)
+				frappe.db.set_value("Process Payment Reconciliation Log", log, "reconciled", 1)
 				frappe.db.set_value("Process Payment Reconciliation", doc, "status", "Completed")
 
 
@@ -540,8 +550,7 @@ def check_multi_currency(pr_doc):
 def is_any_doc_running(for_filter: str | dict | None = None) -> str | None:
 	running_doc = None
 	if for_filter:
-		if isinstance(for_filter, str):
-			for_filter = json.loads(for_filter)
+		for_filter = frappe.parse_json(for_filter)
 
 		running_doc = frappe.db.get_value(
 			"Process Payment Reconciliation",

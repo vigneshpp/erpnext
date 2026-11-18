@@ -3,8 +3,11 @@
 
 import frappe
 from frappe import _, qb
-from frappe.query_builder import Column, functions
+from frappe.desk.reportview import build_match_conditions
+from frappe.query_builder import functions
+from frappe.query_builder.custom import ConstantColumn
 from frappe.utils import add_days, date_diff, flt, get_first_day, get_last_day, getdate, rounded
+from pypika.terms import Bracket, LiteralValue
 
 from erpnext.accounts.report.financial_statements import get_period_list
 from erpnext.accounts.utils import get_fiscal_year
@@ -35,7 +38,7 @@ class Deferred_Item:
 		self.gle_entries = []
 		# holds period wise total for item
 		self.period_total = []
-		self.last_entry_date = self.service_start_date
+		self.last_entry_date = None
 
 		if gle_entries:
 			self.gle_entries = gle_entries
@@ -103,6 +106,9 @@ class Deferred_Item:
 		actual_months = rounded(total_months * prorate, 1)
 
 		already_booked_amount = self.get_item_total()
+		if not actual_months:
+			return self.base_net_amount - already_booked_amount
+
 		base_amount = self.base_net_amount / actual_months
 
 		if base_amount + already_booked_amount > self.base_net_amount:
@@ -146,18 +152,19 @@ class Deferred_Item:
 		"""
 		simulate future posting by creating dummy gl entries. starts from the last posting date.
 		"""
-		if (
-			self.service_start_date != self.service_end_date
-			and add_days(self.last_entry_date, 1) < self.service_end_date
-		):
+		forecast_start_date = (
+			add_days(self.last_entry_date, 1) if self.last_entry_date else self.service_start_date
+		)
+		if forecast_start_date <= self.service_end_date:
 			self.estimate_for_period_list = get_period_list(
 				self.filters.from_fiscal_year,
 				self.filters.to_fiscal_year,
-				add_days(self.last_entry_date, 1),
+				forecast_start_date,
 				self.service_end_date,
 				"Date Range",
 				"Monthly",
 				company=self.filters.company,
+				ignore_fiscal_year=True,
 			)
 
 			for period in self.estimate_for_period_list:
@@ -300,17 +307,21 @@ class Deferred_Revenue_and_Expense_Report:
 		Get all sales and purchase invoices which has deferred revenue/expense items
 		"""
 		gle = qb.DocType("GL Entry")
-		# column doesn't have an alias option
-		posted = Column("posted")
+		# a literal marker: real GL rows are "posted" (dummy/simulated future entries use "not").
+		# ConstantColumn renders a single-quoted string literal, valid on both backends -- a plain
+		# Column rendered as "posted", which MySQL reads as the string but postgres as an identifier.
+		posted = ConstantColumn("posted").as_("posted")
 
 		if self.filters.type == "Revenue":
-			inv = qb.DocType("Sales Invoice")
+			invoice_doctype = "Sales Invoice"
+			inv = qb.DocType(invoice_doctype)
 			inv_item = qb.DocType("Sales Invoice Item")
 			deferred_flag_field = inv_item["enable_deferred_revenue"]
 			deferred_account_field = inv_item["deferred_revenue_account"]
 
 		elif self.filters.type == "Expense":
-			inv = qb.DocType("Purchase Invoice")
+			invoice_doctype = "Purchase Invoice"
+			inv = qb.DocType(invoice_doctype)
 			inv_item = qb.DocType("Purchase Invoice Item")
 			deferred_flag_field = inv_item["enable_deferred_expense"]
 			deferred_account_field = inv_item["deferred_expense_account"]
@@ -327,13 +338,15 @@ class Deferred_Revenue_and_Expense_Report:
 			)
 			.select(
 				inv.name.as_("doc"),
-				inv.posting_date,
+				# non-grouped columns are constant per grouped invoice / invoice item -> Max() keeps the
+				# GROUP BY valid on postgres while returning the same value MySQL picked.
+				functions.Max(inv.posting_date).as_("posting_date"),
 				inv_item.name.as_("item"),
-				inv_item.item_name,
-				inv_item.service_start_date,
-				inv_item.service_end_date,
-				inv_item.base_net_amount,
-				deferred_account_field,
+				functions.Max(inv_item.item_name).as_("item_name"),
+				functions.Max(inv_item.service_start_date).as_("service_start_date"),
+				functions.Max(inv_item.service_end_date).as_("service_end_date"),
+				functions.Max(inv_item.base_net_amount).as_("base_net_amount"),
+				functions.Max(deferred_account_field).as_(deferred_account_field.name),
 				gle.posting_date.as_("gle_posting_date"),
 				functions.Sum(gle.debit).as_("debit"),
 				functions.Sum(gle.credit).as_("credit"),
@@ -357,6 +370,9 @@ class Deferred_Revenue_and_Expense_Report:
 			.groupby(inv.name, inv_item.name, gle.posting_date)
 			.orderby(gle.posting_date)
 		)
+		if match_conditions := build_match_conditions(invoice_doctype):
+			query = query.where(Bracket(LiteralValue(match_conditions)))
+
 		self.invoices = query.run(as_dict=True)
 
 		uniq_invoice = set([x.doc for x in self.invoices])

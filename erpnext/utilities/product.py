@@ -2,7 +2,7 @@
 # License: GNU General Public License v3. See license.txt
 
 import frappe
-from frappe.utils import cint, flt, fmt_money
+from frappe.utils import cint, cstr, flt, fmt_money
 
 from erpnext.accounts.doctype.pricing_rule.pricing_rule import get_pricing_rule_for_item
 
@@ -32,6 +32,7 @@ def get_price(item_code, price_list, customer_group, company, qty=1, party=None)
 					"stock_qty": qty,
 					"transaction_type": "selling",
 					"price_list": price_list,
+					"price_list_rate": price[0].price_list_rate,
 					"customer_group": customer_group,
 					"company": company,
 					"conversion_rate": 1,
@@ -51,6 +52,12 @@ def get_price(item_code, price_list, customer_group, company, qty=1, party=None)
 				# price without any rules applied
 				mrp = price_obj.price_list_rate or 0
 
+				price_obj.price_list_rate = pricing_rule.get("price_list_rate", mrp)
+				if pricing_rule.margin_type == "Percentage":
+					price_obj.price_list_rate *= 1 + flt(pricing_rule.margin_rate_or_amount) / 100
+				elif pricing_rule.margin_type == "Amount":
+					price_obj.price_list_rate += flt(pricing_rule.margin_rate_or_amount)
+
 				if pricing_rule.pricing_rule_for == "Discount Percentage":
 					price_obj.discount_percent = pricing_rule.discount_percentage
 					price_obj.formatted_discount_percent = str(flt(pricing_rule.discount_percentage, 0)) + "%"
@@ -58,13 +65,15 @@ def get_price(item_code, price_list, customer_group, company, qty=1, party=None)
 						price_obj.price_list_rate * (1.0 - (flt(pricing_rule.discount_percentage) / 100.0))
 					)
 
-				if pricing_rule.pricing_rule_for == "Rate":
-					rate_discount = flt(mrp) - flt(pricing_rule.price_list_rate)
+				elif pricing_rule.pricing_rule_for == "Discount Amount":
+					price_obj.price_list_rate -= flt(pricing_rule.discount_amount)
+
+				if pricing_rule.pricing_rule_for in ("Rate", "Discount Amount"):
+					rate_discount = flt(mrp) - flt(price_obj.price_list_rate)
 					if rate_discount > 0:
 						price_obj.formatted_discount_rate = fmt_money(
 							rate_discount, currency=price_obj["currency"]
 						)
-					price_obj.price_list_rate = pricing_rule.price_list_rate or 0
 
 			if price_obj:
 				price_obj["formatted_price"] = fmt_money(
@@ -79,15 +88,17 @@ def get_price(item_code, price_list, customer_group, company, qty=1, party=None)
 						frappe.db.get_value("Currency", price_obj.currency, "symbol", cache=True)
 						or price_obj.currency
 					)
-					or ""
-				)
+				) or ""
 
-				uom_conversion_factor = frappe.db.sql(
-					"""select	C.conversion_factor
-					from `tabUOM Conversion Detail` C
-					inner join `tabItem` I on C.parent = I.name and C.uom = I.sales_uom
-					where I.name = %s""",
-					item_code,
+				uom_cd = frappe.qb.DocType("UOM Conversion Detail")
+				item_dt = frappe.qb.DocType("Item")
+				uom_conversion_factor = (
+					frappe.qb.from_(uom_cd)
+					.inner_join(item_dt)
+					.on((uom_cd.parent == item_dt.name) & (uom_cd.uom == item_dt.sales_uom))
+					.select(uom_cd.conversion_factor)
+					.where(item_dt.name == item_code)
+					.run()
 				)
 
 				uom_conversion_factor = uom_conversion_factor[0][0] if uom_conversion_factor else 1
@@ -119,46 +130,25 @@ def get_item_codes_by_attributes(attribute_filters, template_item_code=None):
 		if not attribute_values:
 			continue
 
-		wheres = []
-		query_values = []
-		for attribute_value in attribute_values:
-			wheres.append("( attribute = %s and attribute_value = %s )")
-			query_values += [attribute, attribute_value]
+		iva = frappe.qb.DocType("Item Variant Attribute")
+		item_dt = frappe.qb.DocType("Item")
 
-		attribute_query = " or ".join(wheres)
-
+		item_subquery = frappe.qb.from_(item_dt).select(item_dt.name)
 		if template_item_code:
-			variant_of_query = "AND t2.variant_of = %s"
-			query_values.append(template_item_code)
-		else:
-			variant_of_query = ""
+			item_subquery = item_subquery.where(item_dt.variant_of == template_item_code)
 
-		query = f"""
-			SELECT
-				t1.parent
-			FROM
-				`tabItem Variant Attribute` t1
-			WHERE
-				1 = 1
-				AND (
-					{attribute_query}
-				)
-				AND EXISTS (
-					SELECT
-						1
-					FROM
-						`tabItem` t2
-					WHERE
-						t2.name = t1.parent
-						{variant_of_query}
-				)
-			GROUP BY
-				t1.parent
-			ORDER BY
-				NULL
-		"""
-
-		item_codes = set([r[0] for r in frappe.db.sql(query, query_values)])
+		item_codes = set(
+			frappe.qb.from_(iva)
+			.select(iva.parent)
+			# attribute_value is a varchar column; cast values to str so postgres doesn't choke on
+			# `varchar = numeric` for numeric attributes (stored values are strings on both backends)
+			.where(
+				(iva.attribute == attribute) & (iva.attribute_value.isin([cstr(v) for v in attribute_values]))
+			)
+			.where(iva.parent.isin(item_subquery))
+			.groupby(iva.parent)
+			.run(pluck=True)
+		)
 		items.append(item_codes)
 
 	res = list(set.intersection(*items))

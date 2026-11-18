@@ -7,7 +7,7 @@ import copy
 import frappe
 from frappe import _
 from frappe.model.meta import get_field_precision
-from frappe.utils import cint, flt, formatdate, get_link_to_form, getdate, now
+from frappe.utils import cint, flt, get_link_to_form, getdate, now
 from frappe.utils.caching import request_cache
 
 import erpnext
@@ -18,11 +18,17 @@ from erpnext.accounts.doctype.accounting_dimension.accounting_dimension import (
 from erpnext.accounts.doctype.accounting_dimension_filter.accounting_dimension_filter import (
 	get_dimension_filter_map,
 )
-from erpnext.accounts.doctype.accounting_period.accounting_period import ClosedAccountingPeriod
 from erpnext.accounts.doctype.budget.budget import validate_expense_against_budget
+from erpnext.accounts.services.gl_validator import (
+	check_freezing_date,
+	validate_accounting_period,
+	validate_against_pcv,
+	validate_allowed_dimensions,
+	validate_cwip_accounts,
+	validate_disabled_accounts,
+)
 from erpnext.accounts.utils import create_payment_ledger_entry, is_immutable_ledger_enabled
 from erpnext.controllers.budget_controller import BudgetValidation
-from erpnext.exceptions import InvalidAccountDimensionError, MandatoryAccountDimensionError
 
 
 def make_gl_entries(
@@ -132,60 +138,6 @@ def get_accounting_dimensions_for_offsetting_entry(gl_map, company):
 	return accounting_dimensions_to_offset
 
 
-def validate_disabled_accounts(gl_map):
-	accounts = [d.account for d in gl_map if d.account]
-
-	disabled_accounts = frappe.get_all(
-		"Account",
-		filters={"disabled": 1, "is_group": 0, "company": gl_map[0].company},
-		fields=["name"],
-	)
-
-	used_disabled_accounts = set(accounts).intersection(set([d.name for d in disabled_accounts]))
-	if used_disabled_accounts:
-		account_list = "<br>"
-		account_list += ", ".join([frappe.bold(d) for d in used_disabled_accounts])
-		frappe.throw(
-			_("Cannot create accounting entries against disabled accounts: {0}").format(account_list),
-			title=_("Disabled Account Selected"),
-		)
-
-
-def validate_accounting_period(gl_map):
-	accounting_periods = frappe.db.sql(
-		""" SELECT
-			ap.name as name, ap.exempted_role as exempted_role
-		FROM
-			`tabAccounting Period` ap, `tabClosed Document` cd
-		WHERE
-			ap.name = cd.parent
-			AND ap.company = %(company)s
-			AND ap.disabled = 0
-			AND cd.closed = 1
-			AND cd.document_type = %(voucher_type)s
-			AND %(date)s between ap.start_date and ap.end_date
-			""",
-		{
-			"date": gl_map[0].posting_date,
-			"company": gl_map[0].company,
-			"voucher_type": gl_map[0].voucher_type,
-		},
-		as_dict=1,
-	)
-
-	if accounting_periods:
-		if accounting_periods[0].exempted_role:
-			exempted_roles = accounting_periods[0].exempted_role
-			if exempted_roles in frappe.get_roles():
-				return
-		frappe.throw(
-			_(
-				"You cannot create or cancel any accounting entries with in the closed Accounting Period {0}"
-			).format(frappe.bold(accounting_periods[0].name)),
-			ClosedAccountingPeriod,
-		)
-
-
 def process_gl_map(gl_map, merge_entries=True, precision=None, from_repost=False):
 	if not gl_map:
 		return []
@@ -234,14 +186,44 @@ def distribute_gl_based_on_cost_center_allocation(gl_map, precision=None, from_r
 			new_gl_map.append(d)
 			continue
 
-		for sub_cost_center, percentage in cost_center_allocation:
-			gle = copy.deepcopy(d)
-			gle.cost_center = sub_cost_center
-			for field in ("debit", "credit", "debit_in_account_currency", "credit_in_account_currency"):
-				gle[field] = flt(flt(d.get(field)) * percentage / 100, precision)
-			new_gl_map.append(gle)
+		new_gl_map.extend(split_gl_entry_by_cost_center_allocation(d, cost_center_allocation, precision))
 
 	return new_gl_map
+
+
+def get_transaction_currency_precision(entry, default_precision):
+	if not entry.get("transaction_currency"):
+		return default_precision
+	return get_field_precision(
+		frappe.get_meta("GL Entry").get_field("debit_in_transaction_currency"),
+		currency=entry.transaction_currency,
+	)
+
+
+def split_gl_entry_by_cost_center_allocation(gl_entry, cost_center_allocation, precision):
+	transaction_precision = get_transaction_currency_precision(gl_entry, precision)
+	field_precisions = {
+		"debit": precision,
+		"credit": precision,
+		"debit_in_account_currency": precision,
+		"credit_in_account_currency": precision,
+		"debit_in_transaction_currency": transaction_precision,
+		"credit_in_transaction_currency": transaction_precision,
+	}
+	split_entries = []
+	cumulative_percentage = 0
+	allocated = dict.fromkeys(field_precisions, 0)
+	for sub_cost_center, percentage in cost_center_allocation:
+		cumulative_percentage += percentage
+		entry = copy.deepcopy(gl_entry)
+		entry.cost_center = sub_cost_center
+		for field, field_precision in field_precisions.items():
+			allocated_till_now = flt(flt(gl_entry.get(field)) * cumulative_percentage / 100, field_precision)
+			entry[field] = flt(allocated_till_now - allocated[field], field_precision)
+			allocated[field] = allocated_till_now
+		split_entries.append(entry)
+
+	return split_entries
 
 
 @request_cache
@@ -255,7 +237,7 @@ def get_cost_center_allocation_data(company, posting_date, cost_center):
 			"main_cost_center": cost_center,
 		},
 		pluck=True,
-		order_by="valid_from desc",
+		order_by="valid_from desc, creation desc",
 	)
 
 	if not cost_center_allocation:
@@ -265,6 +247,7 @@ def get_cost_center_allocation_data(company, posting_date, cost_center):
 		"Cost Center Allocation Percentage",
 		{"parent": cost_center_allocation},
 		["cost_center", "percentage"],
+		order_by="idx",
 		as_list=True,
 	)
 
@@ -422,15 +405,16 @@ def save_entries(gl_map, adv_adj, update_outstanding, from_repost=False):
 		make_entry(entry, adv_adj, update_outstanding, from_repost)
 
 
-def make_entry(args, adv_adj, update_outstanding, from_repost=False):
+def make_entry(args, adv_adj, update_outstanding, from_repost=False, *, from_reversal=False):
 	gle = frappe.new_doc("GL Entry")
 	gle.update(args)
 	gle.flags.ignore_permissions = 1
 	gle.flags.from_repost = from_repost
+	gle.flags.from_reversal = from_reversal
 	gle.flags.adv_adj = adv_adj
 	gle.flags.update_outstanding = update_outstanding or "Yes"
 	gle.flags.notify_update = False
-	if gle.is_cancelled:
+	if gle.is_cancelled or is_immutable_ledger_enabled():
 		gle.flags.ignore_links = True
 	gle.submit()
 
@@ -440,33 +424,6 @@ def make_entry(args, adv_adj, update_outstanding, from_repost=False):
 		and (gle.is_cancelled == 0 or gle.voucher_type == "Journal Entry")
 	):
 		validate_expense_against_budget(args)
-
-
-def validate_cwip_accounts(gl_map):
-	"""Validate that CWIP account are not used in Journal Entry"""
-	if gl_map and gl_map[0].voucher_type != "Journal Entry":
-		return
-
-	cwip_enabled = any(
-		cint(ac.enable_cwip_accounting)
-		for ac in frappe.db.get_all("Asset Category", "enable_cwip_accounting")
-	)
-	if cwip_enabled:
-		cwip_accounts = [
-			d[0]
-			for d in frappe.db.sql(
-				"""select name from tabAccount
-			where account_type = 'Capital Work in Progress' and is_group=0"""
-			)
-		]
-
-		for entry in gl_map:
-			if entry.account in cwip_accounts:
-				frappe.throw(
-					_(
-						"Account: <b>{0}</b> is capital Work in progress and can not be updated by Journal Entry"
-					).format(entry.account)
-				)
 
 
 def process_debit_credit_difference(gl_map):
@@ -505,20 +462,23 @@ def process_debit_credit_difference(gl_map):
 def get_debit_credit_difference(gl_map, precision):
 	debit_credit_diff = 0.0
 	trx_cur_debit_credit_diff = 0
+	transaction_precision = 0
 
 	for entry in gl_map:
 		entry.debit = flt(entry.debit, precision)
 		entry.credit = flt(entry.credit, precision)
 		debit_credit_diff += entry.debit - entry.credit
 
-		entry.debit_in_transaction_currency = flt(entry.debit_in_transaction_currency, precision)
-		entry.credit_in_transaction_currency = flt(entry.credit_in_transaction_currency, precision)
+		entry_precision = get_transaction_currency_precision(entry, precision)
+		transaction_precision = max(transaction_precision, entry_precision)
+		entry.debit_in_transaction_currency = flt(entry.debit_in_transaction_currency, entry_precision)
+		entry.credit_in_transaction_currency = flt(entry.credit_in_transaction_currency, entry_precision)
 		trx_cur_debit_credit_diff += (
 			entry.debit_in_transaction_currency - entry.credit_in_transaction_currency
 		)
 
 	debit_credit_diff = flt(debit_credit_diff, precision)
-	trx_cur_debit_credit_diff = flt(trx_cur_debit_credit_diff, precision)
+	trx_cur_debit_credit_diff = flt(trx_cur_debit_credit_diff, transaction_precision)
 
 	return debit_credit_diff, trx_cur_debit_credit_diff
 
@@ -575,7 +535,12 @@ def make_round_off_gle(gl_map, debit_credit_diff, trx_cur_debit_credit_diff, pre
 					debit_credit_diff -= flt(d.debit) - flt(d.credit)
 				else:
 					debit_credit_diff += flt(d.credit)
+				trx_cur_debit_credit_diff -= flt(d.debit_in_transaction_currency) - flt(
+					d.credit_in_transaction_currency
+				)
 				round_off_account_exists = True
+
+		debit_credit_diff = flt(debit_credit_diff, precision)
 
 		if round_off_account_exists and abs(debit_credit_diff) < (1.0 / (10**precision)):
 			gl_map.remove(round_off_gle)
@@ -715,10 +680,17 @@ def make_reverse_gl_entries(
 			partial_cancel=partial_cancel,
 		)
 		validate_accounting_period(gl_entries)
-		check_freezing_date(gl_entries[0]["posting_date"], adv_adj)
 
 		is_opening = any(d.get("is_opening") == "Yes" for d in gl_entries)
-		validate_against_pcv(is_opening, gl_entries[0]["posting_date"], gl_entries[0]["company"])
+
+		if immutable_ledger_enabled:
+			validation_date = posting_date or frappe.form_dict.get("posting_date") or getdate()
+		else:
+			validation_date = posting_date if posting_date else gl_entries[0]["posting_date"]
+
+		check_freezing_date(validation_date, gl_entries[0]["company"], adv_adj)
+		validate_against_pcv(is_opening, validation_date, gl_entries[0]["company"])
+
 		if partial_cancel:
 			# Partial cancel is only used by `Advance` in separate account feature.
 			# Only cancel GL entries for unlinked reference using `voucher_detail_no`
@@ -742,7 +714,7 @@ def make_reverse_gl_entries(
 				)
 
 				if not immutable_ledger_enabled:
-					query = query.set(gle.is_cancelled, True)
+					query = query.set(gle.is_cancelled, 1)  # smallint column; postgres rejects boolean true
 
 				query.run()
 		else:
@@ -753,12 +725,14 @@ def make_reverse_gl_entries(
 				if not all(gle_names):
 					set_as_cancel(gl_entries[0]["voucher_type"], gl_entries[0]["voucher_no"])
 				else:
-					frappe.db.sql(
-						"""UPDATE `tabGL Entry` SET is_cancelled = 1,
-						modified=%s, modified_by=%s
-						where name in %s and is_cancelled = 0""",
-						(now(), frappe.session.user, tuple(gle_names)),
-					)
+					gle = frappe.qb.DocType("GL Entry")
+					(
+						frappe.qb.update(gle)
+						.set(gle.is_cancelled, 1)
+						.set(gle.modified, now())
+						.set(gle.modified_by, frappe.session.user)
+						.where(gle.name.isin(gle_names) & (gle.is_cancelled == 0))
+					).run()
 
 		for entry in gl_entries:
 			new_gle = copy.deepcopy(entry)
@@ -783,99 +757,23 @@ def make_reverse_gl_entries(
 
 			if immutable_ledger_enabled:
 				new_gle["is_cancelled"] = 0
-				new_gle["posting_date"] = frappe.form_dict.get("posting_date") or getdate()
+				new_gle["posting_date"] = posting_date or frappe.form_dict.get("posting_date") or getdate()
 			elif posting_date:
 				new_gle["posting_date"] = posting_date
 
-			if new_gle["debit"] or new_gle["credit"]:
-				make_entry(new_gle, adv_adj, "Yes")
-
-
-def check_freezing_date(posting_date, company, adv_adj=False):
-	"""
-	Nobody can do GL Entries where posting date is before freezing date
-	except authorized person
-
-	Administrator has all the roles so this check will be bypassed if any role is allowed to post
-	Hence stop admin to bypass if accounts are freezed
-	"""
-	if not adv_adj:
-		acc_frozen_till_date = frappe.db.get_value("Company", company, "accounts_frozen_till_date")
-		if acc_frozen_till_date:
-			frozen_accounts_modifier = frappe.db.get_value(
-				"Company", company, "role_allowed_for_frozen_entries"
-			)
-			if getdate(posting_date) <= getdate(acc_frozen_till_date) and (
-				frozen_accounts_modifier not in frappe.get_roles() or frappe.session.user == "Administrator"
-			):
-				frappe.throw(
-					_("You are not authorized to add or update entries before {0}").format(
-						formatdate(acc_frozen_till_date)
-					)
-				)
-
-
-def validate_against_pcv(is_opening, posting_date, company):
-	if is_opening and frappe.db.exists("Period Closing Voucher", {"docstatus": 1, "company": company}):
-		frappe.throw(
-			_("Opening Entry can not be created after Period Closing Voucher is created."),
-			title=_("Invalid Opening Entry"),
-		)
-
-	last_pcv_date = frappe.db.get_value(
-		"Period Closing Voucher", {"docstatus": 1, "company": company}, [{"MAX": "period_end_date"}]
-	)
-
-	if last_pcv_date and getdate(posting_date) <= getdate(last_pcv_date):
-		message = _("Books have been closed till the period ending on {0}").format(formatdate(last_pcv_date))
-		message += "</br >"
-		message += _("You cannot create/amend any accounting entries till this date.")
-		frappe.throw(message, title=_("Period Closed"))
+			if any([debit, credit, debit_in_account_currency, credit_in_account_currency]):
+				make_entry(new_gle, adv_adj, "Yes", from_reversal=True)
 
 
 def set_as_cancel(voucher_type, voucher_no):
 	"""
 	Set is_cancelled=1 in all original gl entries for the voucher
 	"""
-	frappe.db.sql(
-		"""UPDATE `tabGL Entry` SET is_cancelled = 1,
-		modified=%s, modified_by=%s
-		where voucher_type=%s and voucher_no=%s and is_cancelled = 0""",
-		(now(), frappe.session.user, voucher_type, voucher_no),
-	)
-
-
-def validate_allowed_dimensions(gl_entry, dimension_filter_map):
-	for key, value in dimension_filter_map.items():
-		dimension = key[0]
-		account = key[1]
-
-		if gl_entry.account == account:
-			if value["is_mandatory"] and not gl_entry.get(dimension):
-				frappe.throw(
-					_("{0} is mandatory for account {1}").format(
-						frappe.bold(frappe.unscrub(dimension)), frappe.bold(gl_entry.account)
-					),
-					MandatoryAccountDimensionError,
-				)
-
-			if value["allow_or_restrict"] == "Allow":
-				if gl_entry.get(dimension) and gl_entry.get(dimension) not in value["allowed_dimensions"]:
-					frappe.throw(
-						_("Invalid value {0} for {1} against account {2}").format(
-							frappe.bold(gl_entry.get(dimension)),
-							frappe.bold(frappe.unscrub(dimension)),
-							frappe.bold(gl_entry.account),
-						),
-						InvalidAccountDimensionError,
-					)
-			else:
-				if gl_entry.get(dimension) and gl_entry.get(dimension) in value["allowed_dimensions"]:
-					frappe.throw(
-						_("Invalid value {0} for {1} against account {2}").format(
-							frappe.bold(gl_entry.get(dimension)),
-							frappe.bold(frappe.unscrub(dimension)),
-							frappe.bold(gl_entry.account),
-						),
-						InvalidAccountDimensionError,
-					)
+	gle = frappe.qb.DocType("GL Entry")
+	(
+		frappe.qb.update(gle)
+		.set(gle.is_cancelled, 1)
+		.set(gle.modified, now())
+		.set(gle.modified_by, frappe.session.user)
+		.where((gle.voucher_type == voucher_type) & (gle.voucher_no == voucher_no) & (gle.is_cancelled == 0))
+	).run()
